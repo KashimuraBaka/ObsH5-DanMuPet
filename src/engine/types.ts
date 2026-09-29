@@ -59,6 +59,7 @@ export interface CharContext {
   /** True when the sprite is mirrored, which for a left-facing default means facing right. */
   flip: boolean;
   canvasWidth: number;
+  canvasHeight: number;
 }
 
 /** The inhale field: where it starts, how far it reaches, which way it points. */

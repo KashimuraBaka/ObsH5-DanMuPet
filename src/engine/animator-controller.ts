@@ -186,10 +186,25 @@ export class AnimatorController {
       }
     }
 
-    // ---- set velocity and run the solver ----
+    // ---- set velocity and run physics (planck.js) ----
     kirby.setVelocityX(desiredVX);
-    world.update(deltaTime, ctx, kirby.getTightBox(ctx.frame), canvasWidth, canvasHeight);
-    kirby.sync(ctx, world.characterBody);
+    world.update(
+      deltaTime,
+      ctx,
+      kirby.getTightBox(ctx.frame),
+      kirby.x,
+      kirby.y,
+      kirby.velocityX,
+      kirby.velocityY,
+    );
+    kirby.sync(
+      ctx,
+      world,
+      world.charPxValue,
+      world.charPyValue,
+      world.charVxValue,
+      world.charVyValue,
+    );
 
     // ---- post-solver state updates ----
     if (state === "run" && desiredVX !== 0) {

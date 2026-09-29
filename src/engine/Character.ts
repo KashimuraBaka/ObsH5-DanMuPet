@@ -1,5 +1,4 @@
-import Matter from "matter-js";
-import { INHALE_BODY_MULT } from "./constants.ts";
+import { PhysicsWorld } from "./PhysicsWorld.ts";
 import type {
   CharBox,
   CharContext,
@@ -12,67 +11,62 @@ import type {
 /** Alpha above this counts as an opaque pixel when computing the tight box. */
 const ALPHA_THRESHOLD = 16;
 
-/** Tolerance for considering the body at rest on the ground. */
+/** Tolerance for considering the character at rest on the ground. */
 const GROUND_VY_THRESHOLD = 0.5;
 
-/** Tolerance for considering the body to have been falling (just landed). */
+/** Tolerance for considering the character to have been falling (just landed). */
 const LAND_FALL_THRESHOLD = 0.5;
 
 /**
- * The character: a Matter.js body whose position is the source of truth for
- * the collision geometry.
+ * The character: a planck.js dynamic body whose position is the source of
+ * truth for the collision geometry.
  *
- * `x`/`y` are computed from the body position using the current frame's tight
- * box, which is what the renderer already consumes. All physics (gravity,
- * landing, collision) is handled by the Matter.js solver — this class only
- * exposes the body state and sets velocities for input.
+ * `_px`/`_py` track the character's offset from the canvas centre / ground
+ * in canvas coordinates. The PhysicsWorld handles the actual physics.
  */
 export class Character {
   private spriteSheet: HTMLImageElement | null = null;
   private readonly tightCache = new Map<string, TightBox>();
-  private body: Matter.Body | null = null;
-  private lastCtx: CharContext | null = null;
-  private _isOnGround = true;
+
+  // Physics state (canvas coordinates)
+  private _px = 0;
+  private _py = 0;
+  private _vx = 0;
+  private _vy = 0;
+  private _onGround = true;
   private _wasOnGround = true;
   private _justLanded = false;
-  private _prevVelocityY = 0;
+  private _prevVy = 0;
 
-  // ---- computed state (from the body) ----
+  // Cached geometry for detecting shape changes
+  private lastCtx: CharContext | null = null;
+  private lastFrame: Frame | null = null;
+  private lastTight: TightBox | null = null;
+  private lastScale = 1;
+  private lastFlip = false;
 
-  /** Horizontal offset from the canvas centre. */
+  // ---- computed state ----
+
+  /** Horizontal offset from the canvas centre (pixels). */
   get x(): number {
-    if (!this.body || !this.lastCtx) return 0;
-    const ctx = this.lastCtx;
-    const tight = this.getTightBox(ctx.frame);
-    const s = ctx.scale;
-    const tightCenterX = ctx.flip
-      ? ctx.frame.w - tight.bx - tight.bw / 2
-      : tight.bx + tight.bw / 2;
-    const offX = (-ctx.frame.w * s) / 2 + tightCenterX * s;
-    return this.body.position.x - offX - ctx.canvasWidth / 2;
+    return this._px;
   }
 
   /** Vertical offset from the ground surface; 0 means standing on the ground. */
   get y(): number {
-    if (!this.body || !this.lastCtx) return 0;
-    const ctx = this.lastCtx;
-    const tight = this.getTightBox(ctx.frame);
-    const s = ctx.scale;
-    const tightCenterY = tight.by + tight.bh / 2;
-    const offY = -ctx.frame.h * s + tightCenterY * s;
-    return this.body.position.y - offY - ctx.groundY;
+    return this._py;
   }
 
   get velocityY(): number {
-    return this.body ? this.body.velocity.y : 0;
+    return this._vy;
   }
 
   get velocityX(): number {
-    return this.body ? this.body.velocity.x : 0;
+    return this._vx;
   }
 
   get isOnGround(): boolean {
-    return this._isOnGround;
+    return this._onGround;
   }
 
   get wasOnGround(): boolean {
@@ -83,7 +77,7 @@ export class Character {
     return this._justLanded;
   }
 
-  // ---- sprite / tight-box (unchanged) ----
+  // ---- sprite / tight-box ----
 
   setSpriteSheet(sheet: HTMLImageElement | null): void {
     if (this.spriteSheet === sheet) return;
@@ -117,13 +111,13 @@ export class Character {
         );
         try {
           const data = g.getImageData(0, 0, frame.w, frame.h).data;
-          let minX = frame.w;
-          let minY = frame.h;
-          let maxX = -1;
-          let maxY = -1;
+          let minX = frame.w,
+            minY = frame.h,
+            maxX = -1,
+            maxY = -1;
           for (let py = 0; py < frame.h; py++) {
             for (let px = 0; px < frame.w; px++) {
-              if (data[(py * frame.w + px) * 4 + 3] > ALPHA_THRESHOLD) {
+              if (data[(py * frame.w + px) * 4 + 3] >= ALPHA_THRESHOLD) {
                 if (px < minX) minX = px;
                 if (px > maxX) maxX = px;
                 if (py < minY) minY = py;
@@ -131,7 +125,7 @@ export class Character {
               }
             }
           }
-          if (maxX >= 0) {
+          if (maxX >= minX && maxY >= minY) {
             box = {
               bx: minX,
               by: minY,
@@ -139,8 +133,8 @@ export class Character {
               bh: maxY - minY + 1,
             };
           }
-        } catch {
-          // getImageData can fail on a tainted canvas; keep the full frame
+        } catch (_e) {
+          // Tainted canvas — fall back to the full frame.
         }
       }
     }
@@ -149,141 +143,146 @@ export class Character {
     return box;
   }
 
-  // ---- collision geometry ----
-
-  /**
-   * The collision box in canvas coordinates, derived from the sprite's opaque
-   * pixels rather than its (padded) frame rectangle.
-   */
   getBox(ctx: CharContext): CharBox | null {
     const tight = this.getTightBox(ctx.frame);
     const s = ctx.scale;
+    const w = tight.bw * s;
+    const h = tight.bh * s;
 
-    if (!this.body) {
-      // Fallback: compute from default position (0, 0)
-      const rectLeft = ctx.canvasWidth / 2 - (ctx.frame.w * s) / 2;
-      const rectBottom = ctx.groundY;
-      const left = ctx.flip
-        ? rectLeft + (ctx.frame.w - tight.bx - tight.bw) * s
-        : rectLeft + tight.bx * s;
-      return {
-        left,
-        right: left + tight.bw * s,
-        top: rectBottom - ctx.frame.h * s + tight.by * s,
-        bottom: rectBottom - ctx.frame.h * s + (tight.by + tight.bh) * s,
-        feetInset: (ctx.frame.h - tight.by - tight.bh) * s,
-      };
-    }
+    // Compute the character's center in canvas coordinates
+    const tightCenterX = ctx.flip
+      ? ctx.frame.w - tight.bx - tight.bw / 2
+      : tight.bx + tight.bw / 2;
+    const offX = (-ctx.frame.w * s) / 2 + tightCenterX * s;
+    const offY = -ctx.frame.h * s + (tight.by + tight.bh / 2) * s;
 
-    // Body position IS the tight-box centre
-    const bx = this.body.position.x;
-    const by = this.body.position.y;
-    const left = bx - (tight.bw * s) / 2;
-    const top = by - (tight.bh * s) / 2;
+    const canvasX = ctx.canvasWidth / 2 + this._px + offX;
+    const canvasY = ctx.groundY + this._py + offY;
+
     return {
-      left,
-      right: left + tight.bw * s,
-      top,
-      bottom: top + tight.bh * s,
-      feetInset: (ctx.frame.h - tight.by - tight.bh) * s,
+      left: canvasX - w / 2,
+      right: canvasX + w / 2,
+      top: canvasY - h / 2,
+      bottom: canvasY + h / 2,
+      feetInset: 0,
     };
   }
 
-  // ---- inhale / mouth geometry (unchanged) ----
-
   getInhaleAnchor(ctx: CharContext): InhaleAnchor | null {
-    const box = this.getBox(ctx);
-    if (!box) return null;
-    const dir: 1 | -1 = ctx.flip ? 1 : -1;
-    const bodyLen = box.bottom - box.top;
-    const range = bodyLen * INHALE_BODY_MULT;
-    const mouthX = ctx.flip ? box.right : box.left;
+    if (!this.lastCtx) return null;
+    const s = ctx.scale;
+    const tight = this.getTightBox(ctx.frame);
+
+    // Compute the character's center in canvas coordinates
+    const tightCenterX = ctx.flip
+      ? ctx.frame.w - tight.bx - tight.bw / 2
+      : tight.bx + tight.bw / 2;
+    const offX = (-ctx.frame.w * s) / 2 + tightCenterX * s;
+    const offY = -ctx.frame.h * s + (tight.by + tight.bh / 2) * s;
+
+    const canvasX = ctx.canvasWidth / 2 + this._px + offX;
+    const canvasY = ctx.groundY + this._py + offY;
+
     return {
-      x: mouthX,
-      y: box.top + bodyLen * 0.42,
-      bodyLen,
-      range,
-      dir,
+      x: canvasX,
+      y: canvasY,
+      bodyLen: tight.bh * s,
+      range: 0,
+      dir: ctx.flip ? -1 : 1,
     };
   }
 
   getMouthPos(ctx: CharContext): Point {
-    const box = this.getBox(ctx);
-    if (!box) return { x: ctx.canvasWidth / 2, y: ctx.groundY };
+    const s = ctx.scale;
+    const tight = this.getTightBox(ctx.frame);
+
+    // Compute the character's center in canvas coordinates
+    const tightCenterX = ctx.flip
+      ? ctx.frame.w - tight.bx - tight.bw / 2
+      : tight.bx + tight.bw / 2;
+    const offX = (-ctx.frame.w * s) / 2 + tightCenterX * s;
+    const offY = -ctx.frame.h * s + (tight.by + tight.bh / 2) * s;
+
+    const canvasX = ctx.canvasWidth / 2 + this._px + offX;
+    const canvasY = ctx.groundY + this._py + offY;
+
     return {
-      x: ctx.flip ? box.left : box.right,
-      y: box.top + (box.bottom - box.top) * 0.42,
+      x: canvasX,
+      y: canvasY - (tight.bh * s) * 0.35,
     };
   }
 
-  // ---- input / state ----
+  // ---- input ----
 
-  /** Set the desired horizontal velocity (called before the solver runs). */
   setVelocityX(vx: number): void {
-    if (!this.body) return;
-    Matter.Body.setVelocity(this.body, { x: vx, y: this.body.velocity.y });
+    this._vx = vx;
   }
 
-  /** Launch upward, e.g. on a jump key press. */
   jump(impulse: number): void {
-    if (!this.body) return;
-    Matter.Body.setVelocity(this.body, { x: this.body.velocity.x, y: impulse });
+    this._vy = impulse;
+    this._onGround = false;
+    this._wasOnGround = false;
   }
+
+  /** Teleport horizontally, keeping the current height. */
+  teleportX(x: number): void {
+    if (!this.lastCtx) return;
+    this._px = x;
+  }
+
+  /** Hard-snap to the ground surface. */
+  snapToGround(groundY: number): void {
+    if (!this.lastCtx) return;
+    const ctx = this.lastCtx;
+    const tight = this.getTightBox(ctx.frame);
+    const s = ctx.scale;
+    const tightCenterY = tight.by + tight.bh / 2;
+    const offY = -ctx.frame.h * s + tightCenterY * s;
+    // Place body so its bottom rests on groundY
+    this._py = groundY - ctx.groundY - offY - (tight.bh * s) / 2;
+    this._vy = 0;
+    this._onGround = true;
+    this._wasOnGround = true;
+  }
+
+  // ---- physics update ----
 
   /**
-   * Drop whatever surface was remembered and fall. The solver handles this
-   * automatically (no ground below = fall), so this is a no-op kept for
-   * backward compatibility.
+   * Called by the AnimatorController after the PhysicsWorld has stepped.
+   * Reads the character's position and velocity from the physics world
+   * and updates the state (onGround, justLanded, etc).
    */
-  detach(): void {
-    // No-op: the solver handles landing and falling automatically.
-  }
+  sync(
+    ctx: CharContext,
+    world: PhysicsWorld,
+    charPx: number,
+    charPy: number,
+    charVx: number,
+    charVy: number,
+  ): void {
+    this._px = charPx;
+    this._py = charPy;
+    this._vx = charVx;
+    this._vy = charVy;
+    this.lastCtx = ctx;
 
-  /** Teleport horizontally for screen wrap-around. */
-  teleportX(x: number): void {
-    if (!this.body || !this.lastCtx) return;
-    const ctx = this.lastCtx;
     const tight = this.getTightBox(ctx.frame);
     const s = ctx.scale;
     const tightCenterX = ctx.flip
       ? ctx.frame.w - tight.bx - tight.bw / 2
       : tight.bx + tight.bw / 2;
     const offX = (-ctx.frame.w * s) / 2 + tightCenterX * s;
-    const bodyX = ctx.canvasWidth / 2 + x + offX;
-    Matter.Body.setPosition(this.body, { x: bodyX, y: this.body.position.y });
-    Matter.Body.setVelocity(this.body, { x: 0, y: this.body.velocity.y });
-  }
+    const offY = -ctx.frame.h * s + (tight.by + tight.bh / 2) * s;
 
-  /** Snap the character to the ground surface, zeroing velocity. */
-  snapToGround(groundY: number): void {
-    if (!this.body || !this.lastCtx) return;
-    const ctx = this.lastCtx;
-    const tight = this.getTightBox(ctx.frame);
-    const s = ctx.scale;
-    const tightCenterY = tight.by + tight.bh / 2;
-    const offY = -ctx.frame.h * s + tightCenterY * s;
-    const bodyY = groundY + offY;
-    Matter.Body.setPosition(this.body, { x: this.body.position.x, y: bodyY });
-    Matter.Body.setVelocity(this.body, { x: 0, y: 0 });
-  }
-
-  /**
-   * Read back the body state after the solver runs. Computes `isOnGround`,
-   * `wasOnGround`, and `justLanded` for the animation state machine.
-   */
-  sync(ctx: CharContext, body: Matter.Body | null): void {
-    this.body = body;
-    this.lastCtx = ctx;
-    if (!body) return;
-
-    const vy = body.velocity.y;
-    const prevVy = this._prevVelocityY;
-    const isGrounded = Math.abs(vy) < GROUND_VY_THRESHOLD;
+    // Check if the character is on the ground
+    const canvasY = ctx.groundY + this._py + offY;
+    const bottom = canvasY + (tight.bh * s) / 2;
+    const isOnGround = bottom >= ctx.groundY - 0.5;
 
     this._justLanded =
-      !this._wasOnGround && isGrounded && prevVy > LAND_FALL_THRESHOLD;
-    this._wasOnGround = this._isOnGround;
-    this._isOnGround = isGrounded;
-    this._prevVelocityY = vy;
+      !this._wasOnGround && isOnGround && this._prevVy > LAND_FALL_THRESHOLD;
+    this._wasOnGround = this._onGround;
+    this._onGround = isOnGround;
+    this._prevVy = charVy;
   }
 }

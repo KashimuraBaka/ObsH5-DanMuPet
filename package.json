@@ -10,12 +10,11 @@
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "matter-js": "^0.20.0",
     "pinia": "^4.0.3",
+    "planck": "^1.5.0",
     "vue": "^3.4.0"
   },
   "devDependencies": {
-    "@types/matter-js": "^0.20.2",
     "@vitejs/plugin-vue": "^5.0.0",
     "typescript": "^5.9.3",
     "vite": "^5.0.0",

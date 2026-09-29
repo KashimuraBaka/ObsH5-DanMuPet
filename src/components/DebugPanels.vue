@@ -200,7 +200,7 @@
                 type="number"
                 v-model.number="animator.spawnCount"
                 min="1"
-                max="50"
+                max="200"
                 class="phys-count"
                 title="每次创建的数量"
               />

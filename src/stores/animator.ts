@@ -261,6 +261,7 @@ export const useAnimatorStore = defineStore("animator", () => {
       groundY: groundY(),
       flip: shouldFlipChar(anim),
       canvasWidth: viewport.width,
+      canvasHeight: viewport.height,
     };
   }
 
@@ -308,7 +309,7 @@ export const useAnimatorStore = defineStore("animator", () => {
 
   /** Spawn `count` blocks at once - the panel's quick-generation path. */
   function spawnGravityBlocks(count: number): void {
-    const n = Math.min(50, Math.max(1, Math.floor(count) || 1));
+    const n = Math.min(200, Math.max(1, Math.floor(count) || 1));
     for (let i = 0; i < n; i++) spawnGravityBlock();
   }
 
@@ -507,6 +508,7 @@ export const useAnimatorStore = defineStore("animator", () => {
           state.value =
             state.value === "walkWithEnemy" ? "jumpWithEnemy" : "jump";
           kirby.jump(-10);
+          world.jump(-10);
         }
         break;
       case "x":
@@ -625,6 +627,7 @@ export const useAnimatorStore = defineStore("animator", () => {
     }
     if (newState === "jump" || newState === "jumpWithEnemy") {
       kirby.jump(-10);
+      world.jump(-10);
     }
     if (newState !== "slide") {
       // Left slide state: clear the auto-return guard
