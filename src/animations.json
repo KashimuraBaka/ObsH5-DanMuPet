@@ -1,0 +1,197 @@
+{
+  "imageSize": { "width": 1191, "height": 1106 },
+  "globalSpeed": 0.5,
+  "animations": {
+    "idle": {
+      "frames": [
+        { "name": "Kirby_51", "x": 42, "y": 124, "w": 20, "h": 18 },
+        { "name": "Kirby_52", "x": 83, "y": 124, "w": 20, "h": 18 }
+      ],
+      "frameDurationMs": 500,
+      "loop": true,
+      "defaultFacing": "left",
+      "description": "眨眼动画 (500ms/帧)"
+    },
+    "crouch": {
+      "frames": [
+        { "name": "Kirby_62", "x": 509, "y": 127, "w": 25, "h": 10 },
+        { "name": "Kirby_63", "x": 554, "y": 128, "w": 25, "h": 10 }
+      ],
+      "frameDurationMs": 500,
+      "loop": true,
+      "defaultFacing": "left",
+      "description": "蹲下眨眼动画 (500ms/帧)"
+    },
+    "walk": {
+      "frames": [
+        { "name": "Kirby_66", "x": 42, "y": 158, "w": 20, "h": 18 },
+        { "name": "Kirby_67", "x": 85, "y": 155, "w": 21, "h": 19 },
+        { "name": "Kirby_68", "x": 132, "y": 155, "w": 20, "h": 18 },
+        { "name": "Kirby_69", "x": 182, "y": 157, "w": 19, "h": 16 },
+        { "name": "Kirby_70", "x": 221, "y": 156, "w": 17, "h": 17 },
+        { "name": "Kirby_71", "x": 266, "y": 154, "w": 17, "h": 18 },
+        { "name": "Kirby_72", "x": 310, "y": 152, "w": 21, "h": 19 },
+        { "name": "Kirby_73", "x": 361, "y": 151, "w": 20, "h": 18 }
+      ],
+      "frameDurationMs": 50,
+      "loop": true,
+      "defaultFacing": "left",
+      "description": "行走动画 (200ms/帧)"
+    },
+    "run": {
+      "frames": [
+        { "name": "Kirby_81", "x": 42, "y": 196, "w": 19, "h": 19 },
+        { "name": "Kirby_82", "x": 81, "y": 196, "w": 17, "h": 18 },
+        { "name": "Kirby_83", "x": 113, "y": 195, "w": 18, "h": 19 },
+        { "name": "Kirby_84", "x": 150, "y": 195, "w": 19, "h": 19 },
+        { "name": "Kirby_85", "x": 196, "y": 194, "w": 18, "h": 19 },
+        { "name": "Kirby_86", "x": 237, "y": 193, "w": 17, "h": 18 },
+        { "name": "Kirby_87", "x": 275, "y": 192, "w": 19, "h": 19 },
+        { "name": "Kirby_88", "x": 313, "y": 191, "w": 24, "h": 19 }
+      ],
+      "frameDurationMs": 50,
+      "loop": true,
+      "defaultFacing": "left",
+      "description": "奔跑动画"
+    },
+    "jump": {
+      "frames": [
+        { "name": "Kirby_53", "x": 129, "y": 121, "w": 20, "h": 20 },
+        { "name": "Kirby_54", "x": 172, "y": 122, "w": 21, "h": 19 },
+        { "name": "Kirby_55", "x": 209, "y": 122, "w": 20, "h": 18 },
+        { "name": "Kirby_56", "x": 253, "y": 121, "w": 21, "h": 19 },
+        { "name": "Kirby_57", "x": 300, "y": 120, "w": 20, "h": 20 },
+        { "name": "Kirby_58", "x": 343, "y": 120, "w": 21, "h": 17 },
+        { "name": "Kirby_59", "x": 385, "y": 118, "w": 22, "h": 18 },
+        { "name": "Kirby_60", "x": 431, "y": 118, "w": 21, "h": 19 },
+        { "name": "Kirby_61", "x": 470, "y": 118, "w": 20, "h": 19 }
+      ],
+      "frameDurationMs": 30,
+      "loop": false,
+      "defaultFacing": "left",
+      "description": "跳跃动画"
+    },
+    "attack": {
+      "frames": [
+        { "name": "Kirby_97", "x": 41, "y": 248, "w": 22, "h": 18 },
+        { "name": "Kirby_98", "x": 88, "y": 249, "w": 22, "h": 16 },
+        { "name": "Kirby_99", "x": 148, "y": 249, "w": 22, "h": 17 },
+        { "name": "Kirby_100", "x": 214, "y": 246, "w": 22, "h": 19 },
+        { "name": "Kirby_101", "x": 259, "y": 245, "w": 23, "h": 19 },
+        { "name": "Kirby_102", "x": 311, "y": 243, "w": 23, "h": 21 },
+        { "name": "Kirby_103", "x": 358, "y": 243, "w": 22, "h": 22 },
+        { "name": "Kirby_104", "x": 404, "y": 244, "w": 23, "h": 21 },
+        { "name": "Kirby_105", "x": 451, "y": 242, "w": 22, "h": 22 },
+        { "name": "Kirby_106", "x": 503, "y": 246, "w": 21, "h": 17 },
+        { "name": "Kirby_107", "x": 549, "y": 247, "w": 23, "h": 16 },
+        { "name": "Kirby_108", "x": 597, "y": 249, "w": 23, "h": 17 },
+        { "name": "Kirby_109", "x": 641, "y": 249, "w": 21, "h": 17 }
+      ],
+      "frameDurationMs": 40,
+      "loop": true,
+      "defaultFacing": "left",
+      "description": "吸入动画"
+    },
+    "holdEnemy": {
+      "frames": [
+        { "name": "Kirby_142", "x": 183, "y": 395, "w": 25, "h": 22 },
+        { "name": "Kirby_143", "x": 226, "y": 395, "w": 25, "h": 22 }
+      ],
+      "frameDurationMs": 500,
+      "loop": false,
+      "defaultFacing": "left",
+      "description": "含着敌人眨眼动画 (吸入后保持, 按X吞下)"
+    },
+    "swallow": {
+      "frames": [
+        { "name": "Kirby_140", "x": 74, "y": 396, "w": 23, "h": 22 },
+        { "name": "Kirby_141", "x": 128, "y": 395, "w": 25, "h": 22 },
+        { "name": "Kirby_142", "x": 183, "y": 395, "w": 25, "h": 22 },
+        { "name": "Kirby_143", "x": 226, "y": 395, "w": 25, "h": 22 },
+        { "name": "Kirby_144", "x": 276, "y": 402, "w": 30, "h": 14 },
+        { "name": "Kirby_145", "x": 327, "y": 404, "w": 32, "h": 11 },
+        { "name": "Kirby_146", "x": 382, "y": 401, "w": 26, "h": 14 },
+        { "name": "Kirby_147", "x": 436, "y": 393, "w": 18, "h": 22 },
+        { "name": "Kirby_148", "x": 478, "y": 396, "w": 22, "h": 17 },
+        { "name": "Kirby_149", "x": 523, "y": 396, "w": 22, "h": 18 },
+        { "name": "Kirby_150", "x": 574, "y": 397, "w": 24, "h": 17 }
+      ],
+      "frameDurationMs": 60,
+      "loop": false,
+      "defaultFacing": "left",
+      "description": "吞下敌人动画"
+    },
+    "walkWithEnemy": {
+      "frames": [
+        { "name": "Kirby_110", "x": 38, "y": 294, "w": 23, "h": 23 },
+        { "name": "Kirby_111", "x": 87, "y": 295, "w": 22, "h": 22 },
+        { "name": "Kirby_112", "x": 136, "y": 296, "w": 24, "h": 21 },
+        { "name": "Kirby_113", "x": 186, "y": 294, "w": 24, "h": 23 },
+        { "name": "Kirby_114", "x": 237, "y": 292, "w": 23, "h": 24 },
+        { "name": "Kirby_115", "x": 282, "y": 291, "w": 24, "h": 24 },
+        { "name": "Kirby_116", "x": 324, "y": 292, "w": 24, "h": 23 },
+        { "name": "Kirby_117", "x": 372, "y": 292, "w": 23, "h": 23 },
+        { "name": "Kirby_118", "x": 419, "y": 292, "w": 23, "h": 22 },
+        { "name": "Kirby_119", "x": 461, "y": 292, "w": 24, "h": 21 },
+        { "name": "Kirby_120", "x": 506, "y": 288, "w": 24, "h": 23 },
+        { "name": "Kirby_121", "x": 550, "y": 287, "w": 22, "h": 23 },
+        { "name": "Kirby_122", "x": 594, "y": 285, "w": 24, "h": 24 },
+        { "name": "Kirby_123", "x": 643, "y": 283, "w": 24, "h": 24 },
+        { "name": "Kirby_124", "x": 679, "y": 283, "w": 24, "h": 23 },
+        { "name": "Kirby_125", "x": 724, "y": 284, "w": 24, "h": 23 },
+        { "name": "Kirby_126", "x": 768, "y": 284, "w": 24, "h": 23 }
+      ],
+      "frameDurationMs": 40,
+      "loop": true,
+      "defaultFacing": "left",
+      "description": "吞敌行走动画"
+    },
+    "phone": {
+      "frames": [
+        { "name": "Kirby_222", "x": 698, "y": 572, "w": 20, "h": 31 },
+        { "name": "Kirby_223", "x": 736, "y": 575, "w": 20, "h": 27 },
+        { "name": "Kirby_236", "x": 776, "y": 579, "w": 26, "h": 24 },
+        { "name": "Kirby_237", "x": 819, "y": 580, "w": 22, "h": 21 },
+        { "name": "Kirby_238", "x": 859, "y": 577, "w": 25, "h": 24 },
+        { "name": "Kirby_239", "x": 904, "y": 581, "w": 23, "h": 21 },
+        { "name": "Kirby_240", "x": 945, "y": 579, "w": 25, "h": 22 },
+        { "name": "Kirby_241", "x": 985, "y": 581, "w": 23, "h": 19 },
+        { "name": "Kirby_242", "x": 1027, "y": 577, "w": 23, "h": 21 },
+        { "name": "Kirby_243", "x": 1060, "y": 577, "w": 23, "h": 21 },
+        { "name": "Kirby_232", "x": 1091, "y": 575, "w": 25, "h": 23 },
+        { "name": "Kirby_233", "x": 1124, "y": 576, "w": 26, "h": 23 },
+        { "name": "Kirby_244", "x": 1160, "y": 578, "w": 22, "h": 21 }
+      ],
+      "frameDurationMs": 40,
+      "loop": true,
+      "defaultFacing": "left",
+      "description": "打电话动画"
+    },
+    "slide": {
+      "frames": [
+        { "name": "Kirby_64", "x": 600, "y": 122, "w": 27, "h": 16 },
+        { "name": "Kirby_65", "x": 639, "y": 121, "w": 22, "h": 16 }
+      ],
+      "frameDurationMs": 100,
+      "loop": false,
+      "defaultFacing": "left",
+      "description": "滑铲动画 (下键+攻击键, 滑铲一段距离)"
+    },
+    "jumpWithEnemy": {
+      "frames": [
+        { "name": "Kirby_127", "x": 43, "y": 341, "w": 21, "h": 31 },
+        { "name": "Kirby_128", "x": 92, "y": 345, "w": 23, "h": 23 },
+        { "name": "Kirby_129", "x": 138, "y": 343, "w": 23, "h": 24 },
+        { "name": "Kirby_130", "x": 186, "y": 341, "w": 24, "h": 24 },
+        { "name": "Kirby_131", "x": 232, "y": 340, "w": 24, "h": 23 },
+        { "name": "Kirby_132", "x": 279, "y": 338, "w": 26, "h": 23 },
+        { "name": "Kirby_133", "x": 334, "y": 338, "w": 25, "h": 23 },
+        { "name": "Kirby_134", "x": 379, "y": 341, "w": 29, "h": 18 }
+      ],
+      "frameDurationMs": 60,
+      "loop": false,
+      "defaultFacing": "left",
+      "description": "吞敌跳跃动画"
+    }
+  }
+}
