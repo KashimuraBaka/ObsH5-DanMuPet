@@ -1,6 +1,6 @@
 {
   "imageSize": { "width": 1191, "height": 1106 },
-  "globalSpeed": 0.5,
+  "globalSpeed": 1.0,
   "animations": {
     "idle": {
       "frames": [
@@ -176,6 +176,15 @@
       "loop": false,
       "defaultFacing": "left",
       "description": "滑铲动画 (下键+攻击键, 滑铲一段距离)"
+    },
+    "brake": {
+      "frames": [
+        { "name": "Kirby_76", "x": 499, "y": 148, "w": 22, "h": 20 }
+      ],
+      "frameDurationMs": 100,
+      "loop": true,
+      "defaultFacing": "left",
+      "description": "奔跑急转向刹车动画 (单帧姿势, 沿原方向滑行一段距离后转向奔跑)"
     },
     "jumpWithEnemy": {
       "frames": [

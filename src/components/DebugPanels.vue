@@ -68,7 +68,7 @@
             <label>状态</label>
             <div class="state-btn-group">
               <button
-                v-for="s in KIRBY_STATES"
+                v-for="s in PANEL_STATES"
                 :key="s"
                 :class="['state-btn', { active: animator.state === s }]"
                 @click="animator.state = s"
@@ -248,7 +248,7 @@
 <script setup lang="ts">
 import { onUnmounted, ref, type CSSProperties } from 'vue'
 import {
-  KIRBY_STATES,
+  PANEL_STATES,
   PANEL_DEFS,
   STATE_LABELS,
   useAnimatorStore,

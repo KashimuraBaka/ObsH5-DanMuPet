@@ -8,6 +8,7 @@ import {
   PhysicsWorld,
   computeLayout,
   INHALE_BODY_MULT,
+  MIN_RUN_DISTANCE,
   WORLD_SCALE,
   type AnimationConfig,
   type CharContext,
@@ -31,10 +32,19 @@ export const KIRBY_STATES = [
   'walkWithEnemy',
   'phone',
   'slide',
+  'brake',
+  'coast',
   'jumpWithEnemy'
 ] as const
 
 export type KirbyState = (typeof KIRBY_STATES)[number]
+
+/**
+ * States offered as buttons in the animation panel. `coast` is left out: it is
+ * an internal movement state that already plays the run animation, so a
+ * separate button would only duplicate the run preview.
+ */
+export const PANEL_STATES: readonly KirbyState[] = KIRBY_STATES.filter(s => s !== 'coast')
 
 export const STATE_LABELS: Record<string, string> = {
   idle: '待机',
@@ -48,6 +58,8 @@ export const STATE_LABELS: Record<string, string> = {
   walkWithEnemy: '吞敌行走',
   phone: '打电话',
   slide: '滑铲',
+  brake: '刹车',
+  coast: '原地小跑',
   jumpWithEnemy: '吞敌跳跃'
 }
 
@@ -64,6 +76,13 @@ const ATTACK_KEYS = ['x', 'X']
 
 /** Double-tap window for switching from walk to run. */
 const DOUBLE_TAP_MS = 200
+
+/**
+ * Grace window after releasing a run: re-pressing a direction within this many
+ * ms resumes the run, so a quick release+press never drops him into a walk
+ * mid-stride.
+ */
+const RUN_RESUME_MS = 100
 
 /** How long the closed-eye blink frame stays visible. */
 const BLINK_MS = 150
@@ -92,7 +111,7 @@ export const useAnimatorStore = defineStore('animator', () => {
 
   // ---- playback / view state ----
   const state = ref<KirbyState>('idle')
-  const speed = ref<number>(animationDataRaw.globalSpeed || 0.5)
+  const speed = ref<number>(animationDataRaw.globalSpeed || 1.0)
   // Sprite zoom. The world itself is drawn at 1/5 scale (WORLD_SCALE), so this
   // multiplies on top of that - 10 keeps Kirby at his original size relative to
   // the platform.
@@ -170,6 +189,9 @@ export const useAnimatorStore = defineStore('animator', () => {
   // ---- animation lookup ----
   function getCurrentAnimation(): AnimationConfig {
     const anims = animationData.animations as Record<string, AnimationConfig>
+    // The release-coast plays the run cycle as-is; only the ground speed
+    // drops, so the legs keep running while he jogs to a stop.
+    if (state.value === 'coast') return anims.run
     return anims[state.value] || anims.idle
   }
 
@@ -322,6 +344,15 @@ export const useAnimatorStore = defineStore('animator', () => {
     return { frame: frameData, charCtx }
   }
 
+  // Direction keys currently held. Turning around mid-walk means pressing the
+  // opposite key while the first is still down, so releasing that first key
+  // has to hand the walk over to the key still held - not stop it.
+  const heldDirKeys = new Set<string>()
+
+  // When the run direction was last released; null when there is no run to
+  // resume. Lets a quick release+press pick the run back up.
+  let runReleasedAt: number | null = null
+
   // ---- input ----
   function handleKeydown(e: KeyboardEvent): void {
     // Ignore key repeat events (auto-repeat when holding key)
@@ -340,6 +371,37 @@ export const useAnimatorStore = defineStore('animator', () => {
     else if (RIGHT_KEYS.includes(e.key)) direction = 1
 
     if (direction !== null) {
+      heldDirKeys.add(e.key)
+
+      // Mid-skid: a direction press only re-aims where the skid ends up, it
+      // must not disturb the skid itself.
+      if (state.value === 'brake') {
+        controller.brakeTargetDir = direction
+        controller.heldDirection = direction
+        return
+      }
+
+      // A re-press shortly after letting go of a run still counts as running,
+      // so a quick release+press never drops him back into a walk.
+      const runGrace = runReleasedAt !== null && (currentTime - runReleasedAt) <= RUN_RESUME_MS
+      if (runGrace) runReleasedAt = null
+
+      const running = state.value === 'run' || runGrace
+      const turnFromRun = running && kirby.isOnGround && direction !== controller.walkDirection
+      if (turnFromRun && controller.runDistance >= MIN_RUN_DISTANCE) {
+        // Momentum earned: skid to a stop first, then run the new way (the
+        // classic Kirby turn brake).
+        controller.startBrake(direction)
+        controller.heldDirection = direction
+        state.value = 'brake'
+        return
+      }
+      if (turnFromRun) {
+        // The run never got going - a two-step run turns back into a walk
+        // instead of skidding or doing a full-speed U-turn.
+        state.value = 'walk'
+      }
+
       controller.walkDirection = direction
       controller.heldDirection = direction
       controller.isFacingRight = direction > 0
@@ -351,9 +413,14 @@ export const useAnimatorStore = defineStore('animator', () => {
           // run clip is never restarted mid-stride
           if (state.value !== 'run') state.value = 'run'
           controller.lastKeyDirection = null
+        } else if (running && !turnFromRun) {
+          // Keep running: the release+press was too quick to read as a walk.
+          state.value = 'run'
+          controller.lastKeyDirection = null
         } else {
-          // Single tap: if already walking/running, keep that state and just turn
-          if (state.value !== 'walk' && state.value !== 'run') state.value = 'walk'
+          // Single tap: 'run' cannot reach here (the branch above owns it),
+          // so this is a turn from idle or a non-moving state into a walk.
+          if (state.value !== 'walk') state.value = 'walk'
           controller.lastKeyDirection = direction
           controller.lastKeyTime = currentTime
         }
@@ -381,7 +448,7 @@ export const useAnimatorStore = defineStore('animator', () => {
         // Attack / Slide: down+attack triggers slide, attack alone triggers attack.
         // While holding an enemy in his mouth, X swallows it instead of inhaling.
         controller.attackKeyHeld = true
-        if (!isJumping.value && state.value !== 'slide') {
+        if (!isJumping.value && state.value !== 'slide' && state.value !== 'brake') {
           if (controller.downKeyHeld) {
             controller.previousSlideState = state.value
             controller.slideDone = false
@@ -400,7 +467,7 @@ export const useAnimatorStore = defineStore('animator', () => {
       case 'S':
         // Crouch / Slide: attack+down triggers slide, down alone triggers crouch
         controller.downKeyHeld = true
-        if (!isJumping.value && state.value !== 'slide') {
+        if (!isJumping.value && state.value !== 'slide' && state.value !== 'brake') {
           if (controller.attackKeyHeld) {
             controller.previousSlideState = state.value
             controller.slideDone = false
@@ -420,9 +487,39 @@ export const useAnimatorStore = defineStore('animator', () => {
       controller.shiftHeld = false
       if (state.value === 'run') state.value = 'walk'
     }
-    if (['ArrowLeft', 'ArrowRight', 'a', 'A', 'd', 'D'].includes(e.key)) {
-      controller.heldDirection = 0
-      if (state.value === 'walk' || state.value === 'run') state.value = 'idle'
+    if (LEFT_KEYS.includes(e.key) || RIGHT_KEYS.includes(e.key)) {
+      heldDirKeys.delete(e.key)
+      // Another direction key may still be held (the usual way to turn
+      // around): hand the walk over to the most recently pressed one that is
+      // still down instead of stopping. Only a fully released direction stops
+      // the character.
+      const remaining = [...heldDirKeys].filter(k => LEFT_KEYS.includes(k) || RIGHT_KEYS.includes(k))
+      if (remaining.length) {
+        const lastHeld = remaining[remaining.length - 1]
+        const dir = LEFT_KEYS.includes(lastHeld) ? -1 : 1
+        controller.heldDirection = dir
+        if (state.value === 'brake') {
+          // Mid-skid: only re-aim where he ends up; the skid keeps sliding
+          // the old way and slows down on its own.
+          controller.brakeTargetDir = dir
+        } else {
+          controller.walkDirection = dir
+          controller.isFacingRight = dir > 0
+        }
+      } else {
+        controller.heldDirection = 0
+        if (state.value === 'walk' || state.value === 'run') {
+          if (state.value === 'run') {
+            // Let go of a run: remember it so a quick re-press resumes the
+            // run, and jog on a short stretch before settling into idle.
+            runReleasedAt = Date.now()
+            controller.startCoast()
+            state.value = 'coast'
+          } else {
+            state.value = 'idle'
+          }
+        }
+      }
     }
     if (ATTACK_KEYS.includes(e.key)) {
       controller.attackKeyHeld = false

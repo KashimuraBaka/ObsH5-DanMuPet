@@ -6,7 +6,7 @@
  * Keeping it free of canvas/Vue concerns makes it unit-testable.
  */
 
-import { WORLD_SCALE } from './constants.ts'
+import { BRAKE_TICKS, RUN_COAST_TICKS, WORLD_SCALE } from './constants.ts'
 import type { CharContext, Frame, VerticalStepResult } from './types.ts'
 import type { AnimationConfig } from './SpriteRenderer.ts'
 import { PhysicsWorld } from './PhysicsWorld.ts'
@@ -63,6 +63,18 @@ export class AnimatorController {
   slideDone = false
   swallowDone = false
 
+  // ---- turn-skid (brake) state ----
+  /** Frames left in the current skid; 0 means not braking. */
+  brakeTicksLeft = 0
+  /** Direction to run once the skid is over. */
+  brakeTargetDir = 1
+
+  // ---- run momentum ----
+  /** Distance covered in the current run stint; gates the turn skid. */
+  runDistance = 0
+  /** Frames left in the release-coast; 0 means not coasting. */
+  coastTicksLeft = 0
+
   constructor(private readonly opts: AnimatorControllerOptions) {
     this.nextBlinkTime = 2000 + Math.random() * 3000
   }
@@ -78,6 +90,16 @@ export class AnimatorController {
     }
     if (state === 'slide') {
       this.slideDone = false
+    }
+    if (state === 'brake') {
+      this.brakeTicksLeft = BRAKE_TICKS
+    }
+    if (state === 'coast') {
+      this.coastTicksLeft = RUN_COAST_TICKS
+    }
+    if (state === 'run') {
+      // A fresh run stint: it starts with no momentum.
+      this.runDistance = 0
     }
     if (state !== 'slide') {
       this.slideDone = false
@@ -175,7 +197,12 @@ export class AnimatorController {
 
     if (state === 'walk' || state === 'run') {
       const moveSpeed = state === 'run' ? 3 : 2
-      kirby.tryMoveX(world, this.walkDirection * moveSpeed * this.opts.getSpeed(), ctx)
+      const moved = kirby.tryMoveX(world, this.walkDirection * moveSpeed * this.opts.getSpeed(), ctx)
+      // Only actually-covered distance counts as momentum, so running into a
+      // wall never earns a skid.
+      if (moved && state === 'run') {
+        this.runDistance += moveSpeed * this.opts.getSpeed()
+      }
       if (kirby.x > halfWidth + margin) {
         kirby.x = -halfWidth - margin
       } else if (kirby.x < -halfWidth - margin) {
@@ -196,6 +223,46 @@ export class AnimatorController {
       if (this.frameIndex === anim.frames.length - 1 && !anim.loop) {
         this.slideDone = true
         this.opts.onStateChange(this.previousSlideState)
+      }
+    }
+
+    if (state === 'brake') {
+      // Turn-skid: keep sliding the old way, slowing down, then run the new
+      // direction. The speed decays linearly to zero so the skid visibly
+      // comes to a stop before the turn.
+      const decay = Math.max(0, this.brakeTicksLeft) / BRAKE_TICKS
+      const skidSpeed = 3 * decay * this.opts.getSpeed()
+      kirby.tryMoveX(world, this.walkDirection * skidSpeed, ctx)
+      this.brakeTicksLeft--
+      if (kirby.x > halfWidth + margin) {
+        kirby.x = -halfWidth - margin
+      } else if (kirby.x < -halfWidth - margin) {
+        kirby.x = halfWidth + margin
+      }
+      if (this.brakeTicksLeft <= 0) {
+        // Resume running wherever the player is now pointing; if he let go
+        // of everything mid-skid he has simply braked to a stop.
+        this.walkDirection = this.heldDirection !== 0 ? this.heldDirection : this.brakeTargetDir
+        this.isFacingRight = this.walkDirection > 0
+        this.opts.onStateChange(this.heldDirection !== 0 ? 'run' : 'idle')
+      }
+    }
+
+    if (state === 'coast') {
+      // Release-coast: jog on for a moment on the run clip, decelerating to a
+      // stop, then settle into idle. Every input path in the store exits this
+      // state, so it never traps the player.
+      const decay = Math.max(0, this.coastTicksLeft) / RUN_COAST_TICKS
+      const coastSpeed = 1.6 * decay * this.opts.getSpeed()
+      kirby.tryMoveX(world, this.walkDirection * coastSpeed, ctx)
+      this.coastTicksLeft--
+      if (kirby.x > halfWidth + margin) {
+        kirby.x = -halfWidth - margin
+      } else if (kirby.x < -halfWidth - margin) {
+        kirby.x = halfWidth + margin
+      }
+      if (this.coastTicksLeft <= 0) {
+        this.opts.onStateChange('idle')
       }
     }
 
@@ -242,5 +309,22 @@ export class AnimatorController {
 
   jump(): void {
     this.isHolding = false
+  }
+
+  /**
+   * Begin a turn-skid: keep sliding the old way for BRAKE_TICKS frames at a
+   * decaying speed, then run `targetDir`.
+   */
+  startBrake(targetDir: number): void {
+    this.brakeTargetDir = targetDir
+    this.brakeTicksLeft = BRAKE_TICKS
+  }
+
+  /**
+   * Begin the release-coast: jog on at half speed for RUN_COAST_TICKS frames,
+   * then settle into idle.
+   */
+  startCoast(): void {
+    this.coastTicksLeft = RUN_COAST_TICKS
   }
 }

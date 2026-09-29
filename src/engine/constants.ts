@@ -14,6 +14,24 @@ export const CHAR_GRAVITY = 0.5
 export const MAX_FALL_SPEED = 18
 
 /**
+ * Frames the run-turn skid lasts. He keeps sliding the old way at a linearly
+ * decaying speed over this many frames, then runs the new direction.
+ */
+export const BRAKE_TICKS = 24
+
+/**
+ * Momentum a run must build before a turn is allowed to skid. A run shorter
+ * than this never really got going, so turning just drops back into a walk.
+ */
+export const MIN_RUN_DISTANCE = 24
+
+/**
+ * Frames the release-coast lasts: after letting go of a run he jogs on for a
+ * moment at a decaying speed before settling into idle. Any input interrupts it.
+ */
+export const RUN_COAST_TICKS = 30
+
+/**
  * The ground bricks extend past both viewport edges. Screen wrap-around parks
  * the character just outside the canvas, so without this overhang there would
  * be no block under his feet on the wrap frame and he would fall forever.

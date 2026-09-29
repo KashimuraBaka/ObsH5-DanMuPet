@@ -11,6 +11,7 @@ export {
 export {
   useAnimatorStore,
   KIRBY_STATES,
+  PANEL_STATES,
   STATE_LABELS,
   type KirbyState,
   type StepResult
