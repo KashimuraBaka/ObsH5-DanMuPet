@@ -195,7 +195,15 @@
         <template v-else-if="def.id === 'physics'">
           <div class="phys-body">
             <div class="phys-btns">
-              <button class="phys-btn phys-btn-primary" @click="animator.spawnGravityBlock()">➕ 创建重力方块</button>
+              <button class="phys-btn phys-btn-primary" @click="animator.spawnGravityBlocks(animator.spawnCount)">➕ 创建 ×{{ animator.spawnCount }}</button>
+              <input
+                type="number"
+                v-model.number="animator.spawnCount"
+                min="1"
+                max="50"
+                class="phys-count"
+                title="每次创建的数量"
+              />
               <button class="phys-btn" @click="animator.clearBlocks()">🗑 清空</button>
             </div>
 
@@ -1261,6 +1269,24 @@ onUnmounted(() => {
 
 .phys-btn-primary:hover {
   background: rgba(255, 105, 180, 0.38);
+}
+
+/* Quantity input beside the spawn button (quick batch generation) */
+.phys-count {
+  width: 48px;
+  flex-shrink: 0;
+  padding: 8px 6px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 0.78em;
+  text-align: center;
+}
+
+.phys-count:focus {
+  outline: none;
+  border-color: #ff69b4;
 }
 
 .phys-stats {

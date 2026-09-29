@@ -1,44 +1,44 @@
-import { defineStore } from 'pinia'
-import { reactive } from 'vue'
-import type { PageId } from './ui.ts'
+import { defineStore } from "pinia";
+import { reactive } from "vue";
+import type { PageId } from "./ui.ts";
 
 /** Every floating panel that can be toggled from the right rail. */
-export type PanelId = 'controls' | 'frameEditor' | 'physics'
+export type PanelId = "controls" | "frameEditor" | "physics";
 
 /** Inline style a panel applies to itself (docking, then drag/resize overrides). */
 export interface PanelStyle {
-  left?: string
-  top?: string
-  right?: string
-  bottom?: string
-  width?: string
-  height?: string
+  left?: string;
+  top?: string;
+  right?: string;
+  bottom?: string;
+  width?: string;
+  height?: string;
   /** CSS custom properties, e.g. '--panel-top', used for viewport clamping. */
-  [key: `--${string}`]: string | undefined
+  [key: `--${string}`]: string | undefined;
 }
 
 export interface PanelState {
-  open: boolean
-  collapsed: boolean
-  style: PanelStyle
+  open: boolean;
+  collapsed: boolean;
+  style: PanelStyle;
 }
 
 /** Any combination of n / s / e / w, e.g. 'se' for the bottom-right corner. */
-export type ResizeDirection = 'n' | 's' | 'e' | 'w' | 'nw' | 'ne' | 'sw' | 'se'
+export type ResizeDirection = "n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "se";
 
 export interface PanelDefinition {
-  id: PanelId
-  title: string
+  id: PanelId;
+  title: string;
   /** Only shown while this page is active. */
-  page: PageId
+  page: PageId;
   /** Extra CSS class, so a panel can carry its own width rules. */
-  className?: string
+  className?: string;
   /** Default docking position in px, before the user drags the panel. */
-  initialTop: number
-  initialLeft: number
+  initialTop: number;
+  initialLeft: number;
   /** Size floor for manual resizing. */
-  minWidth: number
-  minHeight: number
+  minWidth: number;
+  minHeight: number;
 }
 
 /**
@@ -47,35 +47,35 @@ export interface PanelDefinition {
  */
 export const PANEL_DEFS: PanelDefinition[] = [
   {
-    id: 'controls',
-    title: '🎲️ 动画控制',
-    page: 'animator',
+    id: "controls",
+    title: "🎲️ 动画控制",
+    page: "animator",
     initialTop: 16,
     initialLeft: 16,
     minWidth: 220,
-    minHeight: 140
+    minHeight: 140,
   },
   {
-    id: 'frameEditor',
-    title: '📐 帧编辑器',
-    page: 'animator',
-    className: 'frame-editor-panel',
+    id: "frameEditor",
+    title: "📐 帧编辑器",
+    page: "animator",
+    className: "frame-editor-panel",
     initialTop: 380,
     initialLeft: 16,
     minWidth: 220,
-    minHeight: 140
+    minHeight: 140,
   },
   {
-    id: 'physics',
-    title: '🧱 物理调试',
-    page: 'animator',
-    className: 'physics-panel',
+    id: "physics",
+    title: "🧱 物理调试",
+    page: "animator",
+    className: "physics-panel",
     initialTop: 16,
     initialLeft: 640,
     minWidth: 220,
-    minHeight: 140
-  }
-]
+    minHeight: 140,
+  },
+];
 
 /**
  * Open/closed, collapsed and geometry state of every floating panel.
@@ -84,36 +84,36 @@ export const PANEL_DEFS: PanelDefinition[] = [
  * closed and re-opened, or moved and then collapsed, keeps the place the user
  * put it.
  */
-export const usePanelStore = defineStore('panels', () => {
+export const usePanelStore = defineStore("panels", () => {
   const panels = reactive<Record<PanelId, PanelState>>({
     controls: { open: true, collapsed: false, style: {} },
     frameEditor: { open: false, collapsed: false, style: {} },
-    physics: { open: false, collapsed: false, style: {} }
-  })
+    physics: { open: false, collapsed: false, style: {} },
+  });
 
   function isOpen(id: PanelId): boolean {
-    return panels[id].open
+    return panels[id].open;
   }
 
   function toggle(id: PanelId): void {
-    panels[id].open = !panels[id].open
+    panels[id].open = !panels[id].open;
   }
 
   function open(id: PanelId): void {
-    panels[id].open = true
+    panels[id].open = true;
   }
 
   function close(id: PanelId): void {
-    panels[id].open = false
+    panels[id].open = false;
   }
 
   function toggleCollapsed(id: PanelId): void {
-    panels[id].collapsed = !panels[id].collapsed
+    panels[id].collapsed = !panels[id].collapsed;
   }
 
   /** Merge a partial style into a panel's geometry. */
   function patchStyle(id: PanelId, patch: PanelStyle): void {
-    Object.assign(panels[id].style, patch)
+    Object.assign(panels[id].style, patch);
   }
 
   /**
@@ -128,14 +128,18 @@ export const usePanelStore = defineStore('panels', () => {
    * empty box under the title bar - drop it while collapsed.
    */
   function styleFor(id: PanelId): PanelStyle {
-    const def = PANEL_DEFS.find(d => d.id === id)
+    const def = PANEL_DEFS.find((d) => d.id === id);
     const style: PanelStyle = def
-      ? { top: `${def.initialTop}px`, left: `${def.initialLeft}px`, ...panels[id].style }
-      : { ...panels[id].style }
-    if (panels[id].collapsed) delete style.height
-    style['--panel-top'] = style.top ?? '0px'
-    style['--panel-left'] = style.left ?? '0px'
-    return style
+      ? {
+          top: `${def.initialTop}px`,
+          left: `${def.initialLeft}px`,
+          ...panels[id].style,
+        }
+      : { ...panels[id].style };
+    if (panels[id].collapsed) delete style.height;
+    style["--panel-top"] = style.top ?? "0px";
+    style["--panel-left"] = style.left ?? "0px";
+    return style;
   }
 
   return {
@@ -146,6 +150,6 @@ export const usePanelStore = defineStore('panels', () => {
     close,
     toggleCollapsed,
     patchStyle,
-    styleFor
-  }
-})
+    styleFor,
+  };
+});

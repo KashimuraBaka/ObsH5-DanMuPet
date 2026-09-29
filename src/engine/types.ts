@@ -8,19 +8,19 @@
 
 /** A single sprite frame, as stored in animations.json. */
 export interface Frame {
-  name: string
-  x: number
-  y: number
-  w: number
-  h: number
+  name: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 /** An axis-aligned rectangle in canvas coordinates. */
 export interface Rect {
-  x: number
-  y: number
-  w: number
-  h: number
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 /**
@@ -28,20 +28,20 @@ export interface Rect {
  * `bx/by` is the first opaque pixel, `bw/bh` the extent.
  */
 export interface TightBox {
-  bx: number
-  by: number
-  bw: number
-  bh: number
+  bx: number;
+  by: number;
+  bw: number;
+  bh: number;
 }
 
 /** The character's collision box in canvas coordinates. */
 export interface CharBox {
-  left: number
-  right: number
-  top: number
-  bottom: number
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
   /** Distance from the frame's bottom edge down to the lowest opaque pixel. */
-  feetInset: number
+  feetInset: number;
 }
 
 /**
@@ -51,33 +51,33 @@ export interface CharBox {
  */
 export interface CharContext {
   /** The frame being displayed this tick. */
-  frame: Frame
+  frame: Frame;
   /** Final on-screen scale, i.e. props.scale * WORLD_SCALE. */
-  scale: number
+  scale: number;
   /** Canvas Y of the ground surface. */
-  groundY: number
+  groundY: number;
   /** True when the sprite is mirrored, which for a left-facing default means facing right. */
-  flip: boolean
-  canvasWidth: number
+  flip: boolean;
+  canvasWidth: number;
 }
 
 /** The inhale field: where it starts, how far it reaches, which way it points. */
 export interface InhaleAnchor {
-  x: number
-  y: number
-  bodyLen: number
-  range: number
+  x: number;
+  y: number;
+  bodyLen: number;
+  range: number;
   /** +1 when facing right, -1 when facing left. */
-  dir: 1 | -1
+  dir: 1 | -1;
 }
 
 export interface Point {
-  x: number
-  y: number
+  x: number;
+  y: number;
 }
 
 /** Outcome of one vertical physics step, so the caller can drive the state machine. */
 export type VerticalStepResult =
-  | { kind: 'standing' }
-  | { kind: 'airborne' }
-  | { kind: 'landed'; surfaceY: number }
+  | { kind: "standing" }
+  | { kind: "airborne" }
+  | { kind: "landed"; surfaceY: number };

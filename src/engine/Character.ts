@@ -1,80 +1,143 @@
-import { PhysicsWorld } from './PhysicsWorld.ts'
-import { CHAR_GRAVITY, INHALE_BODY_MULT, LAND_NEAR_TOP, MAX_FALL_SPEED } from './constants.ts'
-import type { CharBox, CharContext, Frame, InhaleAnchor, Point, TightBox, VerticalStepResult } from './types.ts'
+import Matter from "matter-js";
+import { INHALE_BODY_MULT } from "./constants.ts";
+import type {
+  CharBox,
+  CharContext,
+  Frame,
+  InhaleAnchor,
+  Point,
+  TightBox,
+} from "./types.ts";
 
 /** Alpha above this counts as an opaque pixel when computing the tight box. */
-const ALPHA_THRESHOLD = 16
+const ALPHA_THRESHOLD = 16;
+
+/** Tolerance for considering the body at rest on the ground. */
+const GROUND_VY_THRESHOLD = 0.5;
+
+/** Tolerance for considering the body to have been falling (just landed). */
+const LAND_FALL_THRESHOLD = 0.5;
 
 /**
- * The character: position, velocity, and the pixel-tight collision geometry.
+ * The character: a Matter.js body whose position is the source of truth for
+ * the collision geometry.
  *
- * `x`/`y` are offsets from the render origin (canvas centre / ground surface),
- * which is what the renderer already consumes, so no conversion is needed on
- * the way out.
+ * `x`/`y` are computed from the body position using the current frame's tight
+ * box, which is what the renderer already consumes. All physics (gravity,
+ * landing, collision) is handled by the Matter.js solver — this class only
+ * exposes the body state and sets velocities for input.
  */
 export class Character {
+  private spriteSheet: HTMLImageElement | null = null;
+  private readonly tightCache = new Map<string, TightBox>();
+  private body: Matter.Body | null = null;
+  private lastCtx: CharContext | null = null;
+  private _isOnGround = true;
+  private _wasOnGround = true;
+  private _justLanded = false;
+  private _prevVelocityY = 0;
+
+  // ---- computed state (from the body) ----
+
   /** Horizontal offset from the canvas centre. */
-  x = 0
-  /** Vertical offset from the ground surface; 0 means standing on the ground. */
-  y = 0
-  velocityY = 0
-  /** Canvas Y of the surface being stood on, or null while airborne. */
-  supportSurfaceY: number | null = null
-  isOnGround = true
-
-  private spriteSheet: HTMLImageElement | null = null
-  private readonly tightCache = new Map<string, TightBox>()
-
-  /**
-   * Point the character at a sprite sheet. Changing the sheet invalidates the
-   * tight-box cache, since every cached value was derived from the old pixels.
-   */
-  setSpriteSheet(sheet: HTMLImageElement | null): void {
-    if (this.spriteSheet === sheet) return
-    this.spriteSheet = sheet
-    this.tightCache.clear()
+  get x(): number {
+    if (!this.body || !this.lastCtx) return 0;
+    const ctx = this.lastCtx;
+    const tight = this.getTightBox(ctx.frame);
+    const s = ctx.scale;
+    const tightCenterX = ctx.flip
+      ? ctx.frame.w - tight.bx - tight.bw / 2
+      : tight.bx + tight.bw / 2;
+    const offX = (-ctx.frame.w * s) / 2 + tightCenterX * s;
+    return this.body.position.x - offX - ctx.canvasWidth / 2;
   }
 
-  /**
-   * Pixel-tight bounding box of a sprite frame: the smallest rectangle that
-   * contains every non-transparent pixel.
-   *
-   * Cached per sprite because scanning is O(w*h) and the sheet never changes.
-   * Falls back to the full frame if the canvas is tainted or the sheet is not
-   * loaded yet.
-   */
-  getTightBox(frame: Frame): TightBox {
-    const key = `${frame.name}|${frame.x},${frame.y},${frame.w},${frame.h}`
-    const cached = this.tightCache.get(key)
-    if (cached) return cached
+  /** Vertical offset from the ground surface; 0 means standing on the ground. */
+  get y(): number {
+    if (!this.body || !this.lastCtx) return 0;
+    const ctx = this.lastCtx;
+    const tight = this.getTightBox(ctx.frame);
+    const s = ctx.scale;
+    const tightCenterY = tight.by + tight.bh / 2;
+    const offY = -ctx.frame.h * s + tightCenterY * s;
+    return this.body.position.y - offY - ctx.groundY;
+  }
 
-    let box: TightBox = { bx: 0, by: 0, bw: frame.w, bh: frame.h }
+  get velocityY(): number {
+    return this.body ? this.body.velocity.y : 0;
+  }
+
+  get velocityX(): number {
+    return this.body ? this.body.velocity.x : 0;
+  }
+
+  get isOnGround(): boolean {
+    return this._isOnGround;
+  }
+
+  get wasOnGround(): boolean {
+    return this._wasOnGround;
+  }
+
+  get justLanded(): boolean {
+    return this._justLanded;
+  }
+
+  // ---- sprite / tight-box (unchanged) ----
+
+  setSpriteSheet(sheet: HTMLImageElement | null): void {
+    if (this.spriteSheet === sheet) return;
+    this.spriteSheet = sheet;
+    this.tightCache.clear();
+  }
+
+  getTightBox(frame: Frame): TightBox {
+    const key = `${frame.name}|${frame.x},${frame.y},${frame.w},${frame.h}`;
+    const cached = this.tightCache.get(key);
+    if (cached) return cached;
+
+    let box: TightBox = { bx: 0, by: 0, bw: frame.w, bh: frame.h };
 
     if (this.spriteSheet) {
-      const c = document.createElement('canvas')
-      c.width = frame.w
-      c.height = frame.h
-      const g = c.getContext('2d')
+      const c = document.createElement("canvas");
+      c.width = frame.w;
+      c.height = frame.h;
+      const g = c.getContext("2d");
       if (g) {
-        g.drawImage(this.spriteSheet, frame.x, frame.y, frame.w, frame.h, 0, 0, frame.w, frame.h)
+        g.drawImage(
+          this.spriteSheet,
+          frame.x,
+          frame.y,
+          frame.w,
+          frame.h,
+          0,
+          0,
+          frame.w,
+          frame.h,
+        );
         try {
-          const data = g.getImageData(0, 0, frame.w, frame.h).data
-          let minX = frame.w
-          let minY = frame.h
-          let maxX = -1
-          let maxY = -1
+          const data = g.getImageData(0, 0, frame.w, frame.h).data;
+          let minX = frame.w;
+          let minY = frame.h;
+          let maxX = -1;
+          let maxY = -1;
           for (let py = 0; py < frame.h; py++) {
             for (let px = 0; px < frame.w; px++) {
               if (data[(py * frame.w + px) * 4 + 3] > ALPHA_THRESHOLD) {
-                if (px < minX) minX = px
-                if (px > maxX) maxX = px
-                if (py < minY) minY = py
-                if (py > maxY) maxY = py
+                if (px < minX) minX = px;
+                if (px > maxX) maxX = px;
+                if (py < minY) minY = py;
+                if (py > maxY) maxY = py;
               }
             }
           }
           if (maxX >= 0) {
-            box = { bx: minX, by: minY, bw: maxX - minX + 1, bh: maxY - minY + 1 }
+            box = {
+              bx: minX,
+              by: minY,
+              bw: maxX - minX + 1,
+              bh: maxY - minY + 1,
+            };
           }
         } catch {
           // getImageData can fail on a tainted canvas; keep the full frame
@@ -82,156 +145,145 @@ export class Character {
       }
     }
 
-    this.tightCache.set(key, box)
-    return box
+    this.tightCache.set(key, box);
+    return box;
   }
+
+  // ---- collision geometry ----
 
   /**
    * The collision box in canvas coordinates, derived from the sprite's opaque
    * pixels rather than its (padded) frame rectangle.
    */
   getBox(ctx: CharContext): CharBox | null {
-    const { frame } = ctx
-    const tight = this.getTightBox(frame)
-    const s = ctx.scale
-    const rectLeft = ctx.canvasWidth / 2 + this.x - frame.w * s / 2
-    const rectBottom = ctx.groundY + this.y
+    const tight = this.getTightBox(ctx.frame);
+    const s = ctx.scale;
 
-    // A mirrored sprite maps local x to (frame.w - x), so the tight box has to
-    // be folded back the other way.
-    const left = ctx.flip
-      ? rectLeft + (frame.w - tight.bx - tight.bw) * s
-      : rectLeft + tight.bx * s
+    if (!this.body) {
+      // Fallback: compute from default position (0, 0)
+      const rectLeft = ctx.canvasWidth / 2 - (ctx.frame.w * s) / 2;
+      const rectBottom = ctx.groundY;
+      const left = ctx.flip
+        ? rectLeft + (ctx.frame.w - tight.bx - tight.bw) * s
+        : rectLeft + tight.bx * s;
+      return {
+        left,
+        right: left + tight.bw * s,
+        top: rectBottom - ctx.frame.h * s + tight.by * s,
+        bottom: rectBottom - ctx.frame.h * s + (tight.by + tight.bh) * s,
+        feetInset: (ctx.frame.h - tight.by - tight.bh) * s,
+      };
+    }
 
+    // Body position IS the tight-box centre
+    const bx = this.body.position.x;
+    const by = this.body.position.y;
+    const left = bx - (tight.bw * s) / 2;
+    const top = by - (tight.bh * s) / 2;
     return {
       left,
       right: left + tight.bw * s,
-      top: rectBottom - frame.h * s + tight.by * s,
-      bottom: rectBottom - frame.h * s + (tight.by + tight.bh) * s,
-      // distance from the frame's bottom edge down to the lowest opaque pixel
-      feetInset: (frame.h - tight.by - tight.bh) * s
-    }
+      top,
+      bottom: top + tight.bh * s,
+      feetInset: (ctx.frame.h - tight.by - tight.bh) * s,
+    };
   }
 
-  /**
-   * The inhale anchor: the character's centre, the reach, and the facing
-   * direction. The effective field is a half-disc of 3-4 body lengths opening
-   * the way he looks, so things behind him are never pulled in.
-   */
+  // ---- inhale / mouth geometry (unchanged) ----
+
   getInhaleAnchor(ctx: CharContext): InhaleAnchor | null {
-    const box = this.getBox(ctx)
-    if (!box) return null
-    const bodyLen = box.bottom - box.top
+    const box = this.getBox(ctx);
+    if (!box) return null;
+    const dir: 1 | -1 = ctx.flip ? 1 : -1;
+    const bodyLen = box.bottom - box.top;
+    const range = bodyLen * INHALE_BODY_MULT;
+    const mouthX = ctx.flip ? box.right : box.left;
     return {
-      x: (box.left + box.right) / 2,
-      y: (box.top + box.bottom) / 2,
+      x: mouthX,
+      y: box.top + bodyLen * 0.42,
       bodyLen,
-      range: bodyLen * INHALE_BODY_MULT,
-      // The sprite's default facing is left, so a flipped sprite faces RIGHT.
-      dir: ctx.flip ? 1 : -1
-    }
+      range,
+      dir,
+    };
   }
 
-  /** Where the mouth is, in canvas coordinates - the inhale target. */
   getMouthPos(ctx: CharContext): Point {
-    const box = this.getBox(ctx)
-    if (!box) return { x: ctx.canvasWidth / 2, y: ctx.groundY - 20 }
-    const h = box.bottom - box.top
+    const box = this.getBox(ctx);
+    if (!box) return { x: ctx.canvasWidth / 2, y: ctx.groundY };
     return {
-      x: ctx.flip ? box.left - 6 : box.right + 6,
-      y: box.top + h * 0.38
-    }
+      x: ctx.flip ? box.left : box.right,
+      y: box.top + (box.bottom - box.top) * 0.42,
+    };
   }
 
-  /**
-   * Move horizontally, refusing the step if it would push the character inside
-   * a block.
-   */
-  tryMoveX(world: PhysicsWorld, delta: number, ctx: CharContext): boolean {
-    const before = this.x
-    this.x += delta
-    if (world.hitsSolid(this.getBox(ctx))) {
-      this.x = before
-      return false
-    }
-    return true
-  }
+  // ---- input / state ----
 
-  /**
-   * One tick of vertical physics: gravity plus collision against the world's
-   * blocks, using the pixel-tight box so the character lands exactly where his
-   * visible feet touch a surface.
-   *
-   * Returns what happened so the caller can drive the animation state machine
-   * without the engine knowing about it.
-   */
-  stepVertical(world: PhysicsWorld, ctx: CharContext): VerticalStepResult {
-    const box = this.getBox(ctx)
-
-    if (this.supportSurfaceY !== null && this.velocityY <= 0) {
-      // Standing: re-glue using THIS frame's tight box. This is what makes the
-      // contact frame-independent - no tolerance juggling, no sinking.
-      this.y = this.supportSurfaceY - ctx.groundY + (box ? box.feetInset : 0)
-      this.velocityY = 0
-      this.isOnGround = true
-
-      // Still on a surface? He may have walked off an edge, or the block he was
-      // standing on may have been inhaled.
-      if (!world.surfaceStillThere(box, this.supportSurfaceY)) {
-        this.supportSurfaceY = null
-        this.isOnGround = false
-        return { kind: 'airborne' }
-      }
-      return { kind: 'standing' }
-    }
-
-    // Airborne
-    const prevBox = box
-    this.velocityY = Math.min(this.velocityY + CHAR_GRAVITY, MAX_FALL_SPEED)
-    this.y += this.velocityY
-
-    const moved = this.getBox(ctx)
-    let supportY: number | null = null
-    if (prevBox && moved) {
-      for (const b of world.allSolids()) {
-        if (moved.right <= b.x || moved.left >= b.x + b.w) continue
-        // Either the feet crossed the top surface this tick (fast falls), or
-        // they are already resting within a few px of it (standing / the tight
-        // box changed between frames).
-        const crossed = prevBox.bottom <= b.y && moved.bottom >= b.y
-        const nearTop = Math.abs(moved.bottom - b.y) <= LAND_NEAR_TOP
-        if (crossed || nearTop) {
-          if (supportY === null || b.y < supportY) supportY = b.y
-        }
-      }
-    }
-
-    if (this.velocityY >= 0 && supportY !== null && moved) {
-      this.supportSurfaceY = supportY
-      // Snap so the lowest opaque pixel rests exactly on the surface
-      this.y = supportY - ctx.groundY + moved.feetInset
-      this.velocityY = 0
-      if (!this.isOnGround) {
-        this.isOnGround = true
-        return { kind: 'landed', surfaceY: supportY }
-      }
-      return { kind: 'standing' }
-    }
-
-    this.isOnGround = false
-    return { kind: 'airborne' }
+  /** Set the desired horizontal velocity (called before the solver runs). */
+  setVelocityX(vx: number): void {
+    if (!this.body) return;
+    Matter.Body.setVelocity(this.body, { x: vx, y: this.body.velocity.y });
   }
 
   /** Launch upward, e.g. on a jump key press. */
   jump(impulse: number): void {
-    this.velocityY = impulse
-    this.supportSurfaceY = null
-    this.isOnGround = false
+    if (!this.body) return;
+    Matter.Body.setVelocity(this.body, { x: this.body.velocity.x, y: impulse });
   }
 
-  /** Drop whatever surface was remembered and fall. */
+  /**
+   * Drop whatever surface was remembered and fall. The solver handles this
+   * automatically (no ground below = fall), so this is a no-op kept for
+   * backward compatibility.
+   */
   detach(): void {
-    this.supportSurfaceY = null
-    this.isOnGround = false
+    // No-op: the solver handles landing and falling automatically.
+  }
+
+  /** Teleport horizontally for screen wrap-around. */
+  teleportX(x: number): void {
+    if (!this.body || !this.lastCtx) return;
+    const ctx = this.lastCtx;
+    const tight = this.getTightBox(ctx.frame);
+    const s = ctx.scale;
+    const tightCenterX = ctx.flip
+      ? ctx.frame.w - tight.bx - tight.bw / 2
+      : tight.bx + tight.bw / 2;
+    const offX = (-ctx.frame.w * s) / 2 + tightCenterX * s;
+    const bodyX = ctx.canvasWidth / 2 + x + offX;
+    Matter.Body.setPosition(this.body, { x: bodyX, y: this.body.position.y });
+    Matter.Body.setVelocity(this.body, { x: 0, y: this.body.velocity.y });
+  }
+
+  /** Snap the character to the ground surface, zeroing velocity. */
+  snapToGround(groundY: number): void {
+    if (!this.body || !this.lastCtx) return;
+    const ctx = this.lastCtx;
+    const tight = this.getTightBox(ctx.frame);
+    const s = ctx.scale;
+    const tightCenterY = tight.by + tight.bh / 2;
+    const offY = -ctx.frame.h * s + tightCenterY * s;
+    const bodyY = groundY + offY;
+    Matter.Body.setPosition(this.body, { x: this.body.position.x, y: bodyY });
+    Matter.Body.setVelocity(this.body, { x: 0, y: 0 });
+  }
+
+  /**
+   * Read back the body state after the solver runs. Computes `isOnGround`,
+   * `wasOnGround`, and `justLanded` for the animation state machine.
+   */
+  sync(ctx: CharContext, body: Matter.Body | null): void {
+    this.body = body;
+    this.lastCtx = ctx;
+    if (!body) return;
+
+    const vy = body.velocity.y;
+    const prevVy = this._prevVelocityY;
+    const isGrounded = Math.abs(vy) < GROUND_VY_THRESHOLD;
+
+    this._justLanded =
+      !this._wasOnGround && isGrounded && prevVy > LAND_FALL_THRESHOLD;
+    this._wasOnGround = this._isOnGround;
+    this._isOnGround = isGrounded;
+    this._prevVelocityY = vy;
   }
 }
