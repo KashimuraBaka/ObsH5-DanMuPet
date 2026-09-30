@@ -64,14 +64,6 @@
       <div class="floating-panel-body" v-show="!panels.panels[def.id].collapsed">
         <!-- ---------- Animation controls ---------- -->
         <template v-if="def.id === 'controls'">
-          <div class="control-group">
-            <label>角色</label>
-            <button
-              :class="['gen-btn', { 'gen-active': animator.kirbyEnabled }]"
-              :disabled="animator.kirbyEnabled"
-              @click="animator.spawnKirby()"
-            >{{ animator.kirbyEnabled ? '🌸 已召唤' : '🌸 召唤 Kirby' }}</button>
-          </div>
           <div class="control-group control-group-states">
             <label>状态</label>
             <div class="state-btn-group">
@@ -302,11 +294,11 @@
         <template v-else-if="def.id === 'botGen'">
           <div class="gen-body">
             <div class="gen-section">
-              <h5>生成 Bot</h5>
+              <h5>生成角色</h5>
               <div class="gen-btns">
-                <button class="gen-btn gen-btn-primary" @click="animator.spawnBot('Bot-' + (animator.bots.length + 1))">🤖 ×1</button>
-                <button class="gen-btn" @click="animator.spawnBots(3)">🤖 ×3</button>
-                <button class="gen-btn" @click="animator.spawnBots(5)">🤖 ×5</button>
+                <button class="gen-btn gen-btn-primary" @click="animator.spawnKirby()">🤖 ×1</button>
+                <button class="gen-btn" @click="animator.spawnCharacters(3)">🤖 ×3</button>
+                <button class="gen-btn" @click="animator.spawnCharacters(5)">🤖 ×5</button>
               </div>
             </div>
 

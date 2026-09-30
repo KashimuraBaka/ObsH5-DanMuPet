@@ -436,10 +436,21 @@ export const useAnimatorStore = defineStore("animator", () => {
   }
 
   /** Manually spawn Kirby. Kirby is not auto-generated on init. */
+  /** Spawn a character (AIBot). Can be controlled via takeover mode. */
   function spawnKirby(): void {
-    kirbyEnabled.value = true;
-    // Ensure Kirby starts on the ground
-    kirby.snapToGround(groundY());
+    const bot = new AIBot({ name: `Bot-${bots.value.length + 1}` });
+    bot.x = viewport.width / 2 + (Math.random() - 0.5) * 200;
+    bot.y = groundY();
+    bots.value.push(bot);
+    botEnabled.value = true;
+  }
+
+  /** Spawn N characters at once. */
+  function spawnCharacters(count: number): void {
+    const n = Math.min(20, Math.max(1, Math.floor(count) || 1));
+    for (let i = 0; i < n; i++) {
+      spawnKirby();
+    }
   }
 
   /**
@@ -1104,6 +1115,7 @@ export const useAnimatorStore = defineStore("animator", () => {
     spawnBot,
     spawnBots,
     spawnKirby,
+    spawnCharacters,
     toggleBot,
     toggleTakeoverMode,
     selectCharacterAt,
