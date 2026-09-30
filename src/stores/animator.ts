@@ -646,6 +646,9 @@ export const useAnimatorStore = defineStore("animator", () => {
           viewport.height,
         );
         frameIndex.value = controller.frameIndex;
+      } else {
+        // Step the world physics without character updates (blocks still fall)
+        world.stepOnly(deltaTime);
       }
 
       // First frame: snap to ground so Kirby does not start floating.

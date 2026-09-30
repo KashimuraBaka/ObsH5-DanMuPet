@@ -177,6 +177,55 @@ export class PhysicsWorld {
     return block;
   }
 
+  /** Step the physics world without character updates (for when no character is present). */
+  stepOnly(deltaTime: number): void {
+    // Sync block body types
+    for (const block of this.blocks) {
+      if (block.dead) continue;
+      const body = this.bodies.get(block);
+      if (!body) continue;
+      if (block.inhale) {
+        body.setKinematic();
+        body.setLinearVelocity(new planck.Vec2(0, 0));
+        body.setPosition(
+          toPlank(block.x + block.w / 2, block.y + block.h / 2),
+        );
+      } else {
+        body.setDynamic();
+      }
+    }
+
+    // Step the world
+    this.world.step(TIME_STEP, VEL_ITER, POS_ITER);
+
+    // Sync body positions back to blocks (canvas Y-down, negate plank Y).
+    this.syncBlocksFromBodies();
+  }
+
+  /**
+   * Push planck body state back into the GravityBlock mirrors.
+   *
+   * Canvas is Y-down, planck is Y-up, so the Y axis must be flipped via
+   * `toCanvasY`. Using `pos.y / PX_TO_M` directly (without the negation)
+   * makes a falling block's `block.y` *decrease* over time — i.e. the block
+   * flies up off the top of the screen instead of landing on the ground.
+   */
+  private syncBlocksFromBodies(): void {
+    for (const [block, body] of this.bodies) {
+      if (block.dead) continue;
+      if (block.inhale) continue;
+
+      const pos = body.getPosition();
+      const vy = body.getLinearVelocity().y;
+
+      block.x = toCanvasX(pos.x) - block.w / 2;
+      block.y = toCanvasY(pos.y) - block.h / 2;
+      // px per frame in canvas Y-down (positive = falling).
+      block.vy = toCanvasY(vy) / 60;
+      block.resting = Math.abs(vy) < 0.01;
+    }
+  }
+
   /** Clear all spawned blocks. */
   clear(): void {
     for (const [, body] of this.bodies) {
@@ -321,18 +370,7 @@ export class PhysicsWorld {
 
     // 5. Sync body positions back to blocks (dynamic blocks only).
     // Inhaled blocks are managed by InhaleField — skip them.
-    for (const [block, body] of this.bodies) {
-      if (block.dead) continue;
-      if (block.inhale) continue;
-
-      const pos = body.getPosition();
-      const vy = body.getLinearVelocity().y;
-
-      block.x = toCanvasX(pos.x) - block.w / 2;
-      block.y = toCanvasY(pos.y) - block.h / 2;
-      block.vy = -toCanvasY(vy); // Convert plank Y to canvas Y-down
-      block.resting = Math.abs(vy) < 0.01;
-    }
+    this.syncBlocksFromBodies();
 
     // 6. Sync character position back
     if (this.charBody) {
