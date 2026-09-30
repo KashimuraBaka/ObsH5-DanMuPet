@@ -4,6 +4,7 @@ import animationDataRaw from "../animations.json";
 import {
   AnimatorController,
   AIBot,
+  BotState,
   Character,
   EnemySpawner,
   InhaleField,
@@ -170,15 +171,20 @@ export const useAnimatorStore = defineStore("animator", () => {
   const enemyCount = ref(0);
   const maxEnemies = 15;
 
+  // Kirby is not auto-generated on init; call spawnKirby() to bring him in.
+  // While false the canvas does not render him, bots / enemies target the
+  // scene centre instead of his position, and his physics is skipped.
+  const kirbyEnabled = ref(false);
+
   // True while a direction key is held: the player is driving the character by
   // hand, so the bots stand aside instead of acting out their own script.
   const manualControl = ref(false);
 
-  // Id of the bot the player is driving by hand (manual takeover), or null.
-  // Only one bot can be driven at a time; while it is, that bot reads the held
-  // direction keys and the rest stay stood down, then all resume their own
-  // script the moment the direction keys come up.
-  const manualTakeoverId = ref<number | null>(null);
+  // Click-to-select takeover: selection mode toggle and which entity is
+  // currently controlled. 'kirby' means the player's own character, a number
+  // means a bot id, null means nobody is being driven by hand.
+  const takeoverMode = ref(false);
+  const controlledEntity = ref<"kirby" | number | null>(null);
 
   // One-shot flag: on the first rendered frame, snap Kirby to the ground so
   // he does not start floating (snapToGround is not called by the state
@@ -200,6 +206,23 @@ export const useAnimatorStore = defineStore("animator", () => {
   const editingMode = computed(() => panelStore.panels.frameEditor.open);
 
   const stateLabel = computed(() => STATE_LABELS[state.value] || "待机");
+
+  // Animation state display is based on the currently controlled entity:
+  // - 'kirby' → Kirby's own state machine
+  // - a bot id → that bot's animState
+  // - null → no character is selected (shows as "未选中")
+  const displayState = computed<string | null>(() => {
+    if (controlledEntity.value === null) return null;
+    if (controlledEntity.value === "kirby") return state.value;
+    const bot = bots.value.find((b: any) => b.id === controlledEntity.value);
+    return bot ? (bot.animState as string) : null;
+  });
+
+  const displayStateLabel = computed(() => {
+    const s = displayState.value;
+    if (s === null) return "未选中";
+    return STATE_LABELS[s] || s;
+  });
 
   const currentAnim = computed<AnimationConfig>(() => getCurrentAnimation());
 
@@ -330,7 +353,8 @@ export const useAnimatorStore = defineStore("animator", () => {
   }
 
   function spawnGravityBlock(): void {
-    world.spawn(viewport.width, viewport.height, viewport.width / 2 + kirby.x);
+    const offsetX = kirbyEnabled.value ? kirby.x : 0;
+    world.spawn(viewport.width, viewport.height, viewport.width / 2 + offsetX);
   }
 
   /** Spawn `count` blocks at once - the panel's quick-generation path. */
@@ -366,30 +390,118 @@ export const useAnimatorStore = defineStore("animator", () => {
     botEnabled.value = true;
   }
 
+  /** Spawn N bots at once, each with a unique name. */
+  function spawnBots(count: number): void {
+    const n = Math.min(20, Math.max(1, Math.floor(count) || 1));
+    for (let i = 0; i < n; i++) {
+      spawnBot(`Bot-${bots.value.length + 1}`);
+    }
+  }
+
+  /** Remove every bot and disable AI. */
+  function clearBots(): void {
+    bots.value = [];
+    botEnabled.value = false;
+    if (controlledEntity.value !== null && controlledEntity.value !== "kirby") {
+      controlledEntity.value = null;
+    }
+  }
+
+  /** Spawn a single enemy of a specific type at a random position. */
+  function spawnEnemyOfType(type: "walker" | "flyer" | "jumper"): void {
+    if (enemies.value.length >= maxEnemies) return;
+    const enemy = new EnemySpawner().spawn(
+      type as any,
+      Math.random() * viewport.width,
+      groundY() - 50 - Math.random() * 100,
+    );
+    enemies.value.push(enemy);
+    enemyCount.value = enemies.value.length;
+  }
+
+  /** Spawn N enemies of the given type at once. */
+  function spawnEnemiesOfType(count: number, type: "walker" | "flyer" | "jumper"): void {
+    const n = Math.min(20, Math.max(1, Math.floor(count) || 1));
+    for (let i = 0; i < n; i++) spawnEnemyOfType(type);
+  }
+
   function toggleBot(): void {
     botEnabled.value = !botEnabled.value;
     if (!botEnabled.value) {
       bots.value = [];
-      manualTakeoverId.value = null;
+      if (controlledEntity.value !== null && controlledEntity.value !== "kirby") {
+        controlledEntity.value = null;
+      }
+    }
+  }
+
+  /** Manually spawn Kirby. Kirby is not auto-generated on init. */
+  function spawnKirby(): void {
+    kirbyEnabled.value = true;
+    // Ensure Kirby starts on the ground
+    kirby.snapToGround(groundY());
+  }
+
+  /**
+   * Toggle the click-to-select takeover mode. Three states:
+   * - selection mode off, nothing controlled → enter selection mode
+   * - selection mode on → cancel selection mode
+   * - something controlled → cancel control (clear held keys, reset to idle)
+   */
+  function toggleTakeoverMode(): void {
+    if (takeoverMode.value) {
+      takeoverMode.value = false;
+    } else if (controlledEntity.value !== null) {
+      controlledEntity.value = null;
+      if (
+        state.value === "walk" ||
+        state.value === "run" ||
+        state.value === "coast"
+      ) {
+        state.value = "idle";
+      }
+      heldDirKeys.clear();
+      manualControl.value = false;
+    } else {
+      takeoverMode.value = true;
     }
   }
 
   /**
-   * Take manual control of the given bot. Only one bot can be driven at a
-   * time: taking over a new bot releases the previous one. While a bot is
-   * driven the player's held direction keys move it and the other bots stand
-   * down; releasing the direction keys lets every bot back to its own script.
-   * Ignored while bots are disabled, so a stale id never drives a missing bot.
+   * Test a click position against Kirby and all bots. On hit, set the
+   * controlled entity and exit selection mode. Kirby uses a 25px hit radius;
+   * bots use their own half-extents plus 5px padding.
    */
-  function takeoverBot(botId: number): void {
-    if (!botEnabled.value) return;
-    if (!(bots.value as AIBot[]).some((b) => b.id === botId)) return;
-    manualTakeoverId.value = botId;
-  }
+  function selectCharacterAt(canvasX: number, canvasY: number): void {
+    // Check Kirby first (priority when both overlap) — only when Kirby is enabled
+    if (kirbyEnabled.value) {
+      const rs = buildRenderState();
+      const kirbyCanvasX = rs.canvasWidth / 2 + rs.charX;
+      const kirbyCanvasY = rs.groundY + rs.charY;
+      const kirbyDist = Math.hypot(kirbyCanvasX - canvasX, kirbyCanvasY - canvasY);
+      if (kirbyDist <= 25) {
+        controlledEntity.value = "kirby";
+        takeoverMode.value = false;
+        return;
+      }
+    }
 
-  /** Release manual control; the bots resume their own script next tick. */
-  function releaseTakeover(): void {
-    manualTakeoverId.value = null;
+    // Check bots — bot.x and bot.y are already in canvas coordinates
+    const botList = bots.value as AIBot[];
+    for (const bot of botList) {
+      const hitW = bot.w / 2 + 5;
+      const hitH = bot.h / 2 + 5;
+      if (
+        canvasX >= bot.x - hitW &&
+        canvasX <= bot.x + hitW &&
+        canvasY >= bot.y - hitH &&
+        canvasY <= bot.y + hitH
+      ) {
+        controlledEntity.value = bot.id;
+        takeoverMode.value = false;
+        return;
+      }
+    }
   }
 
   function clearEnemies(): void {
@@ -454,7 +566,7 @@ export const useAnimatorStore = defineStore("animator", () => {
    * Matches AIBot's own convention: `x` is the centre, `y` the feet.
    */
   function buildPlayerCollisionRef(frameData: Frame | undefined): CharacterRef | null {
-    if (!frameData || !spriteReady.value) return null;
+    if (!frameData || !spriteReady.value || !kirbyEnabled.value) return null;
     const s = scale.value * WORLD_SCALE;
     const tight = kirby.getTightBox(frameData);
     const x = kirby.x + viewport.width / 2;
@@ -511,16 +623,19 @@ export const useAnimatorStore = defineStore("animator", () => {
     const charCtx = buildCharContext(anim, frameData);
 
     if (charCtx) {
-      controller.tick(
-        deltaTime,
-        charCtx,
-        world,
-        inhaleField,
-        kirby,
-        viewport.width,
-        viewport.height,
-      );
-      frameIndex.value = controller.frameIndex;
+      // Only run Kirby's physics / state machine when he is actually present.
+      if (kirbyEnabled.value) {
+        controller.tick(
+          deltaTime,
+          charCtx,
+          world,
+          inhaleField,
+          kirby,
+          viewport.width,
+          viewport.height,
+        );
+        frameIndex.value = controller.frameIndex;
+      }
 
       // First frame: snap to ground so Kirby does not start floating.
       // The state watcher only fires on state *changes*, so it never fires
@@ -533,17 +648,24 @@ export const useAnimatorStore = defineStore("animator", () => {
       }
     }
 
-    // Update enemies
+    // Update enemies — target the player's position, or the scene centre
+    // when Kirby is not present.
     const enemyList = enemies.value as any[];
     const groundYVal = groundY();
+    const playerX = kirbyEnabled.value
+      ? kirby.x + viewport.width / 2
+      : viewport.width / 2;
+    const playerY = kirbyEnabled.value
+      ? groundYVal + kirby.y
+      : groundYVal;
     for (const enemy of enemyList) {
       if (enemy.dead) continue;
       enemy.update(
         deltaTime,
         groundYVal,
         world.allSolids().filter((b: any) => !b.dead),
-        kirby.x + viewport.width / 2, // player X position
-        groundYVal + kirby.y,         // player Y position
+        playerX,
+        playerY,
       );
     }
     // Remove dead enemies
@@ -563,29 +685,68 @@ export const useAnimatorStore = defineStore("animator", () => {
         if (leftHeld && !rightHeld) playerDir = -1;
         else if (rightHeld && !leftHeld) playerDir = 1;
       }
-      const takeoverId = manualTakeoverId.value;
-      // While a bot is being driven the player is occupied with it, so the
-      // other bots stand down too - the whole floor resumes once the direction
-      // keys come up.
-      const standDown = playerDir !== 0 || takeoverId !== null;
+      const controlled = controlledEntity.value;
+      const controlledBotId =
+        controlled !== null && controlled !== "kirby" ? controlled : null;
+      const standDown = playerDir !== 0;
+
+      // Compute leader position: the controlled bot, Kirby if enabled, or
+      // the scene centre as a fallback.
+      const fallbackX = kirbyEnabled.value
+        ? kirby.x + viewport.width / 2
+        : viewport.width / 2;
+      const fallbackY = kirbyEnabled.value
+        ? groundYVal + kirby.y
+        : groundYVal;
+      let leaderX = fallbackX;
+      let leaderY = fallbackY;
+      if (controlledBotId !== null) {
+        const leaderBot = botList.find((b) => b.id === controlledBotId);
+        if (leaderBot) {
+          leaderX = leaderBot.x;
+          leaderY = leaderBot.y;
+        }
+      }
 
       for (const bot of botList) {
         bot.canvasWidth = viewport.width;
-        const driven = takeoverId !== null && bot.id === takeoverId;
+        const driven =
+          controlledBotId !== null && bot.id === controlledBotId;
         bot.manualDriven = driven;
         bot.manualDriveDir = playerDir;
         bot.aiSuspended = standDown;
+        // Clear stale locks from this bot before update
+        for (const e of enemyList) {
+          if (e.lockedBy === bot.id) e.lockedBy = undefined;
+        }
         bot.update(
           deltaTime,
           groundYVal,
           world.allSolids().filter((b: any) => !b.dead),
           enemyList.filter((e: any) => !e.dead),
-          kirby.x + viewport.width / 2,
-          groundYVal + kirby.y,
+          leaderX,
+          leaderY,
         );
+        // Lock the bot's target so other bots skip it
+        if (bot.targetEnemy) {
+          bot.targetEnemy.lockedBy = bot.id;
+        }
       }
       // Then resolve bot↔player and bot↔bot overlaps (soft push).
       separateBots(frameData);
+
+      // Dodge jumps: if a bot is trying to move but hasn't moved (blocked by
+      // another bot or the player), trigger a jump to bypass the obstacle.
+      for (const bot of botList) {
+        const moved = Math.abs(bot.x - bot.tickStart);
+        const wantsToMove =
+          bot.state === BotState.CHASE ||
+          bot.state === BotState.PATROL ||
+          (bot.state === BotState.IDLE && bot.animState !== "idle");
+        if (moved < 0.5 && bot.onGround && wantsToMove) {
+          bot.triggerDodgeJump();
+        }
+      }
     }
 
     uiStore.setSpriteName(frameData ? frameData.name : "");
@@ -635,6 +796,17 @@ export const useAnimatorStore = defineStore("animator", () => {
 
     // Disable keyboard controls when in editing mode
     if (editingMode.value) return;
+
+    if (controlledEntity.value === null) return;
+    if (controlledEntity.value !== "kirby") {
+      // Bot control: only track direction keys, don't process Kirby state machine
+      if (LEFT_KEYS.includes(e.key) || RIGHT_KEYS.includes(e.key)) {
+        heldDirKeys.add(e.key);
+        manualControl.value = heldDirKeys.size > 0;
+      }
+      return;
+    }
+    // controlledEntity === 'kirby': fall through to existing Kirby state machine code
 
     const currentTime = Date.now();
     let direction: number | null = null;
@@ -771,6 +943,16 @@ export const useAnimatorStore = defineStore("animator", () => {
   function handleKeyup(e: KeyboardEvent): void {
     if (editingMode.value) return;
 
+    if (controlledEntity.value === null) return;
+    if (controlledEntity.value !== "kirby") {
+      if (LEFT_KEYS.includes(e.key) || RIGHT_KEYS.includes(e.key)) {
+        heldDirKeys.delete(e.key);
+        manualControl.value = heldDirKeys.size > 0;
+      }
+      return;
+    }
+    // controlledEntity === 'kirby': fall through to existing Kirby state machine code
+
     if (e.key === "Shift") {
       controller.shiftHeld = false;
       if (state.value === "run") state.value = "walk";
@@ -877,8 +1059,10 @@ export const useAnimatorStore = defineStore("animator", () => {
     enemies,
     bots,
     botEnabled,
+    kirbyEnabled,
     manualControl,
-    manualTakeoverId,
+    takeoverMode,
+    controlledEntity,
     enemyCount,
     // engine
     world,
@@ -890,6 +1074,8 @@ export const useAnimatorStore = defineStore("animator", () => {
     isJumping,
     editingMode,
     stateLabel,
+    displayState,
+    displayStateLabel,
     currentAnim,
     currentFrameData,
     currentFrameInfo,
@@ -913,11 +1099,16 @@ export const useAnimatorStore = defineStore("animator", () => {
     // enemy and bot actions
     spawnEnemy,
     spawnEnemies,
+    spawnEnemyOfType,
+    spawnEnemiesOfType,
     spawnBot,
+    spawnBots,
+    spawnKirby,
     toggleBot,
-    takeoverBot,
-    releaseTakeover,
+    toggleTakeoverMode,
+    selectCharacterAt,
     clearEnemies,
+    clearBots,
     getBotRenderState,
     setViewport,
     prevFrame,

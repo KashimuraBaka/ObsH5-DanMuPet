@@ -26,9 +26,9 @@
   </div>
 
   <!-- ===== Transparent debug overlay (animator page, debug only) ===== -->
-  <div class="state-indicator" :class="animator.state" v-if="ui.isDebug && ui.currentPage === 'animator'">
-    <div class="dbg-line">STATE&nbsp;&nbsp;{{ animator.stateLabel }} <span class="dbg-dim">[{{ animator.state }}]</span></div>
-    <div class="dbg-line">FRAME&nbsp;&nbsp;{{ animator.currentFrameInfo }}</div>
+  <div class="state-indicator" :class="animator.displayState || 'idle'" v-if="ui.isDebug && ui.currentPage === 'animator'">
+    <div class="dbg-line">STATE&nbsp;&nbsp;{{ animator.displayStateLabel }} <span class="dbg-dim">[{{ animator.displayState || '-' }}]</span></div>
+    <div class="dbg-line" v-if="animator.controlledEntity === 'kirby'">FRAME&nbsp;&nbsp;{{ animator.currentFrameInfo }}</div>
     <div class="dbg-line">IMAGE&nbsp;&nbsp;{{ animator.imageSize.width }}×{{ animator.imageSize.height }}<span class="dbg-dim">&nbsp;&nbsp;ANIMS {{ animator.animationCount }}&nbsp;&nbsp;SPEED {{ animator.globalSpeed }}x</span></div>
     <div class="dbg-line">SCALE&nbsp;&nbsp;{{ animator.scale }}x&nbsp;&nbsp;<span class="dbg-dim">{{ Math.round(animator.viewport.width) }}×{{ Math.round(animator.viewport.height) }}</span></div>
   </div>
@@ -64,13 +64,21 @@
       <div class="floating-panel-body" v-show="!panels.panels[def.id].collapsed">
         <!-- ---------- Animation controls ---------- -->
         <template v-if="def.id === 'controls'">
+          <div class="control-group">
+            <label>角色</label>
+            <button
+              :class="['gen-btn', { 'gen-active': animator.kirbyEnabled }]"
+              :disabled="animator.kirbyEnabled"
+              @click="animator.spawnKirby()"
+            >{{ animator.kirbyEnabled ? '🌸 已召唤' : '🌸 召唤 Kirby' }}</button>
+          </div>
           <div class="control-group control-group-states">
             <label>状态</label>
             <div class="state-btn-group">
               <button
                 v-for="s in PANEL_STATES"
                 :key="s"
-                :class="['state-btn', { active: animator.state === s }]"
+                :class="['state-btn', { active: animator.displayState === s }]"
                 @click="animator.state = s"
               >
                 {{ STATE_LABELS[s] }}
@@ -230,6 +238,123 @@
             </p>
           </div>
         </template>
+
+        <!-- ---------- Monster generation ---------- -->
+        <template v-else-if="def.id === 'monsterGen'">
+          <div class="gen-body">
+            <div class="gen-section">
+              <h5>随机生成</h5>
+              <div class="gen-btns">
+                <button class="gen-btn gen-btn-primary" @click="animator.spawnEnemy()">👾 ×1</button>
+                <button class="gen-btn" @click="animator.spawnEnemies(3)">👾 ×3</button>
+                <button class="gen-btn" @click="animator.spawnEnemies(5)">👾 ×5</button>
+              </div>
+            </div>
+
+            <div class="gen-section">
+              <h5>指定类型</h5>
+              <div class="gen-type-row">
+                <button class="gen-type-btn" @click="animator.spawnEnemyOfType('walker')">🔴 Walker</button>
+                <button class="gen-type-btn" @click="animator.spawnEnemyOfType('flyer')">🔵 Flyer</button>
+                <button class="gen-type-btn" @click="animator.spawnEnemyOfType('jumper')">🟢 Jumper</button>
+              </div>
+              <div class="gen-count-row">
+                <input
+                  type="number"
+                  v-model.number="monsterGenCount"
+                  min="1"
+                  max="20"
+                  class="gen-count"
+                  title="批量生成数量"
+                />
+                <button class="gen-btn" @click="animator.spawnEnemiesOfType(monsterGenCount, monsterGenType)">生成 ×{{ monsterGenCount }}</button>
+                <select v-model="monsterGenType" class="gen-type-select">
+                  <option value="walker">Walker</option>
+                  <option value="flyer">Flyer</option>
+                  <option value="jumper">Jumper</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="gen-section">
+              <h5>管理</h5>
+              <div class="gen-btns">
+                <button class="gen-btn" @click="animator.clearEnemies()">🗑 清除全部</button>
+              </div>
+            </div>
+
+            <div class="gen-stats">
+              <div class="gen-stat">
+                <span>怪物数量</span><b>{{ animator.enemies.length }}</b>
+              </div>
+              <div class="gen-stat">
+                <span>上限</span><b>15</b>
+              </div>
+            </div>
+
+            <p class="gen-hint">
+              怪物会自动巡逻，接近 Kirby 时追猎
+            </p>
+          </div>
+        </template>
+
+        <!-- ---------- Bot generation ---------- -->
+        <template v-else-if="def.id === 'botGen'">
+          <div class="gen-body">
+            <div class="gen-section">
+              <h5>生成 Bot</h5>
+              <div class="gen-btns">
+                <button class="gen-btn gen-btn-primary" @click="animator.spawnBot('Bot-' + (animator.bots.length + 1))">🤖 ×1</button>
+                <button class="gen-btn" @click="animator.spawnBots(3)">🤖 ×3</button>
+                <button class="gen-btn" @click="animator.spawnBots(5)">🤖 ×5</button>
+              </div>
+            </div>
+
+            <div class="gen-section">
+              <h5>AI 控制</h5>
+              <div class="gen-btns">
+                <button class="gen-btn" :class="{ 'gen-active': animator.botEnabled }" @click="animator.toggleBot()">
+                  {{ animator.botEnabled ? '⏸ 暂停 AI' : '▶ 启动 AI' }}
+                </button>
+              </div>
+            </div>
+
+            <div class="gen-section">
+              <h5>接管角色</h5>
+              <div class="gen-btns">
+                <button class="gen-btn" :class="{ 'gen-active': animator.takeoverMode }" @click="animator.toggleTakeoverMode()">
+                  🎮 选择模式
+                </button>
+              </div>
+              <div class="gen-controlled">
+                <span>当前控制：</span>
+                <b v-if="animator.controlledEntity === 'kirby'">Kirby</b>
+                <b v-else-if="animator.controlledEntity !== null">Bot #{{ animator.controlledEntity }}</b>
+                <span v-else class="gen-dim">无</span>
+              </div>
+            </div>
+
+            <div class="gen-section">
+              <h5>管理</h5>
+              <div class="gen-btns">
+                <button class="gen-btn" @click="animator.clearBots()">🗑 清除全部 Bot</button>
+              </div>
+            </div>
+
+            <div class="gen-stats">
+              <div class="gen-stat">
+                <span>Bot 数量</span><b>{{ animator.bots.length }}</b>
+              </div>
+              <div class="gen-stat">
+                <span>AI 状态</span><b :class="{ 'gen-active': animator.botEnabled }">{{ animator.botEnabled ? '运行中' : '已暂停' }}</b>
+              </div>
+            </div>
+
+            <p class="gen-hint">
+              Bot 使用 Kirby 动画，点击画面中的 Bot 可接管控制
+            </p>
+          </div>
+        </template>
       </div>
 
       <!-- Resize handles: 4 edges + 4 corners. Hidden while collapsed so the
@@ -283,12 +408,18 @@ const resizeId = ref<PanelId | null>(null)
 const RAIL_ICONS: Record<PanelId, string> = {
   controls: '🎛️',
   frameEditor: '📐',
-  physics: '🧱'
+  physics: '🧱',
+  monsterGen: '👾',
+  botGen: '🤖'
 }
 
 function railIcon(id: PanelId): string {
   return RAIL_ICONS[id]
 }
+
+// ---- Monster generation panel state ----
+const monsterGenCount = ref(1)
+const monsterGenType = ref<'walker' | 'flyer' | 'jumper'>('walker')
 
 // ============================================================
 //  Panel drag / resize
@@ -1329,6 +1460,205 @@ onUnmounted(() => {
 }
 
 .phys-hint kbd {
+  padding: 1px 5px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+  color: #ff69b4;
+  font-family: monospace;
+  font-size: 0.95em;
+}
+
+/* ============================================================
+    Monster / Bot generation panels
+    ============================================================ */
+.monster-gen-panel,
+.bot-gen-panel {
+  width: min(260px, calc(100vw - var(--panel-w, 48px) - 32px));
+}
+
+.gen-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+}
+
+.gen-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gen-section h5 {
+  margin: 0 0 2px 0;
+  color: #ff69b4;
+  font-size: 0.78em;
+}
+
+.gen-btns {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.gen-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.72em;
+  white-space: nowrap;
+  transition: all 0.15s;
+  text-align: center;
+}
+
+.gen-btn:hover {
+  background: rgba(255, 105, 180, 0.22);
+  border-color: rgba(255, 105, 180, 0.45);
+}
+
+.gen-btn-primary {
+  background: rgba(255, 105, 180, 0.24);
+  border-color: rgba(255, 105, 180, 0.45);
+}
+
+.gen-btn-primary:hover {
+  background: rgba(255, 105, 180, 0.38);
+}
+
+.gen-btn.gen-active {
+  background: rgba(100, 200, 100, 0.3);
+  border-color: rgba(100, 200, 100, 0.6);
+  color: #fff;
+}
+
+.gen-type-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.gen-type-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.68em;
+  white-space: nowrap;
+  transition: all 0.15s;
+  text-align: center;
+}
+
+.gen-type-btn:hover {
+  background: rgba(255, 105, 180, 0.22);
+  border-color: rgba(255, 105, 180, 0.45);
+}
+
+.gen-count-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.gen-count {
+  width: 48px;
+  flex-shrink: 0;
+  padding: 6px 6px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 0.72em;
+  text-align: center;
+}
+
+.gen-count:focus {
+  outline: none;
+  border-color: #ff69b4;
+}
+
+.gen-type-select {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  background: rgba(255, 105, 180, 0.15);
+  border: 1px solid rgba(255, 105, 180, 0.3);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 0.72em;
+  cursor: pointer;
+  color-scheme: dark;
+}
+
+.gen-type-select option {
+  background: #1e1e32;
+  color: #fff;
+}
+
+.gen-controlled {
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  font-size: 0.72em;
+  color: #aaa;
+  margin-top: 4px;
+}
+
+.gen-controlled b {
+  color: #ff69b4;
+}
+
+.gen-dim {
+  color: #666;
+}
+
+.gen-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+}
+
+.gen-stat {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.72em;
+  color: #999;
+}
+
+.gen-stat b {
+  color: #fff;
+  font-weight: bold;
+}
+
+.gen-stat b.gen-active {
+  color: #6c6;
+}
+
+.gen-hint {
+  margin: 0;
+  font-size: 0.68em;
+  line-height: 1.5;
+  color: #888;
+}
+
+.gen-hint kbd {
   padding: 1px 5px;
   background: rgba(255, 255, 255, 0.12);
   border: 1px solid rgba(255, 255, 255, 0.2);

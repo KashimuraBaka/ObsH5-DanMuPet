@@ -3,7 +3,7 @@ import { reactive } from "vue";
 import type { PageId } from "./ui.ts";
 
 /** Every floating panel that can be toggled from the right rail. */
-export type PanelId = "controls" | "frameEditor" | "physics";
+export type PanelId = "controls" | "frameEditor" | "physics" | "monsterGen" | "botGen";
 
 /** Inline style a panel applies to itself (docking, then drag/resize overrides). */
 export interface PanelStyle {
@@ -75,6 +75,26 @@ export const PANEL_DEFS: PanelDefinition[] = [
     minWidth: 220,
     minHeight: 140,
   },
+  {
+    id: "monsterGen",
+    title: "👾 怪物生成",
+    page: "animator",
+    className: "monster-gen-panel",
+    initialTop: 240,
+    initialLeft: 640,
+    minWidth: 220,
+    minHeight: 160,
+  },
+  {
+    id: "botGen",
+    title: "🤖 Bot 生成",
+    page: "animator",
+    className: "bot-gen-panel",
+    initialTop: 440,
+    initialLeft: 640,
+    minWidth: 220,
+    minHeight: 160,
+  },
 ];
 
 /**
@@ -89,6 +109,8 @@ export const usePanelStore = defineStore("panels", () => {
     controls: { open: true, collapsed: false, style: {} },
     frameEditor: { open: false, collapsed: false, style: {} },
     physics: { open: false, collapsed: false, style: {} },
+    monsterGen: { open: false, collapsed: false, style: {} },
+    botGen: { open: false, collapsed: false, style: {} },
   });
 
   function isOpen(id: PanelId): boolean {

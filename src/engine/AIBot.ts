@@ -81,6 +81,8 @@ export interface EnemyRef {
   dead: boolean;
   centreX: number;
   centreY: number;
+  /** Bot id that has claimed this enemy; other bots skip it. */
+  lockedBy?: number;
 }
 
 /**
@@ -195,12 +197,49 @@ export class AIBot {
    */
   private tickStartX: number | null = null;
 
+  /** Returns the bot's X position at the start of the last tick. */
+  get tickStart(): number {
+    return this.tickStartX ?? this.x;
+  }
+
+  /**
+   * When a bot is shoved while standing still (idle pose), the walk cycle is
+   * latched for this many ms so it actually animates its shuffle instead of
+   * being forced back to idle every tick by the AI reset.
+   */
+  private pushWalkTimer = 0;
+
+  /** Cooldown timer (ms) for dodge jumps over blocking bots. */
+  private dodgeJumpCooldown = 0;
+
+  /** Timer (ms) tracking continuous blocked time before a dodge jump. */
+  private blockedTimer = 0;
+
+  /** Threshold (ms) for continuous blocking before a dodge jump triggers. */
+  private static readonly BLOCKED_JUMP_THRESHOLD = 1500;
+
+  /**
+   * Trigger a dodge jump to bypass a blocking bot. Only jumps if the bot has
+   * been continuously blocked for at least BLOCKED_JUMP_THRESHOLD ms. The
+   * blockedTimer is accumulated in update() each tick the bot fails to move.
+   */
+  triggerDodgeJump(): void {
+    if (!this.onGround || this.dodgeJumpCooldown > 0) return;
+    if (this.blockedTimer < AIBot.BLOCKED_JUMP_THRESHOLD) return;
+
+    this.vy = this.config.jumpImpulse * 1.5;
+    this.onGround = false;
+    this.setAnimState("jump");
+    this.dodgeJumpCooldown = 500;
+    this.blockedTimer = 0;
+  }
+
   constructor(config: Partial<AIBotConfig> = {}) {
     this.config = {
       name: "Bot",
       speed: 2.5,
       jumpImpulse: -7,
-      chaseRange: 300,
+      chaseRange: 9999,
       attackRange: 60,
       gravity: 0.4,
       playerFollowRange: 340,
@@ -308,6 +347,7 @@ export class AIBot {
     if (this.recoverTimer > 0) this.recoverTimer -= deltaTime;
     if (this.jumpCooldown > 0) this.jumpCooldown -= deltaTime;
     if (this.patrolTimer > 0) this.patrolTimer -= deltaTime;
+    if (this.dodgeJumpCooldown > 0) this.dodgeJumpCooldown -= deltaTime;
 
     // State machine: decide what to do and set animState / vx
     this.runStateMachine(deltaTime, enemies, playerX, playerY);
@@ -358,6 +398,24 @@ export class AIBot {
       }
     }
 
+    // ---- Blocked detection + dodge jump ----
+    // If the bot wanted to move but its position didn't change (blocked by a
+    // wall or solid block), accumulate blocked time. Once the threshold is
+    // reached, triggerDodgeJump() performs the actual leap and resets timers.
+    const tickDelta = this.x - tickStartX;
+    const wantsToMove =
+      this.state === BotState.CHASE ||
+      this.state === BotState.PATROL ||
+      (this.state === BotState.IDLE && this.animState !== "idle");
+
+    if (Math.abs(tickDelta) < 0.5 && this.onGround && wantsToMove) {
+      this.blockedTimer += deltaTime;
+    } else {
+      this.blockedTimer = 0;
+    }
+
+    this.triggerDodgeJump();
+
     // ---- Boundary wrap-around ----
     const margin = 40;
     if (this.x > this.canvasWidth + margin) {
@@ -384,6 +442,7 @@ export class AIBot {
 
     for (const e of enemies) {
       if (e.dead) continue;
+      if (e.lockedBy !== undefined && e.lockedBy !== this.id) continue;
       const dx = e.centreX - this.centreX;
       const dy = e.centreY - this.centreY;
       const dist = Math.hypot(dx, dy);
@@ -433,6 +492,8 @@ export class AIBot {
     this.recoverTimer = 0;
     this.idleTimer = 0;
     this.attackTimer = 0;
+    this.blockedTimer = 0;
+    this.dodgeJumpCooldown = 0;
   }
 
   /**
@@ -533,7 +594,11 @@ export class AIBot {
       this.onGround &&
       this.animState === "idle"
     ) {
-      this.setAnimState("walk");
+      this.animState = "walk";
+      this.animFrameIndex = 0;
+      this.animTime = 0;
+      this.frameDurationMs = FRAME_DURATIONS.walk ?? 50;
+      this.pushWalkTimer = 250;
     }
 
     this.syncFacing(this.x - (this.tickStartX ?? entryX));
@@ -636,15 +701,12 @@ export class AIBot {
       return;
     }
 
-    // The player is driving the character by hand: the bot stands aside and
-    // plays no part. Its own script is skipped, but the movement and collision
-    // code in update() still runs, so a stand-down bot that is shoved still
-    // walks and faces correctly. Clearing targetEnemy drops any chase it held.
-    if (this.aiSuspended) {
-      this.targetEnemy = null;
-      this.state = BotState.IDLE;
+    // A shoved bot latches a short walk cycle so it animates its shuffle
+    // instead of being snapped back to idle every tick by the AI reset.
+    if (this.pushWalkTimer > 0 && this.onGround && this.state !== BotState.ATTACK && this.state !== BotState.SWALLOW) {
+      this.pushWalkTimer -= deltaTime;
+      this.animState = "walk";
       this.vx = 0;
-      this.setAnimState("idle");
       return;
     }
 
@@ -697,6 +759,13 @@ export class AIBot {
       }
 
       // Otherwise follow the player.
+      if (this.aiSuspended) {
+        this.targetEnemy = null;
+        this.state = BotState.IDLE;
+        this.vx = 0;
+        this.setAnimState("idle");
+        return;
+      }
       this.targetEnemy = null;
       this.state = BotState.IDLE;
       const dx = playerX - this.x;

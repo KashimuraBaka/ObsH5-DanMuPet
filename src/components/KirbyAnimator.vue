@@ -1,20 +1,14 @@
 <template>
   <!-- Fullscreen stage: the canvas IS the page. All debug UI lives in DebugPanels. -->
   <div class="animator-container">
-    <!-- AI Controls -->
-    <div class="ai-controls">
-      <button @click="animator.spawnEnemy()" title="Spawn Enemy">👾</button>
-      <button @click="animator.spawnEnemies(3)" title="Spawn 3">👾×3</button>
-      <button @click="animator.spawnBot('Bot-A')" title="Spawn Bot" :class="{ active: animator.botEnabled }">🤖</button>
-      <button @click="animator.toggleBot()" title="Toggle Bot" :class="{ active: animator.botEnabled }">⏯</button>
-      <button @click="animator.clearEnemies()" title="Clear">🗑️</button>
-      <span class="ai-count">{{ animator.enemies.length }} enemies</span>
-    </div>
     <canvas
       ref="canvasRef"
       :width="animator.viewport.width"
       :height="animator.viewport.height"
       class="kirby-canvas"
+      @click="handleCanvasClick"
+      @mousemove="handleCanvasMove"
+      @mouseleave="handleCanvasLeave"
     />
   </div>
 </template>
@@ -30,6 +24,97 @@ const animator = useAnimatorStore();
 const panels = usePanelStore();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+
+function handleCanvasClick(e: MouseEvent): void {
+  if (!animator.takeoverMode || !canvasRef.value) return;
+  if (animator.editingMode) return;
+  const rect = canvasRef.value.getBoundingClientRect();
+  // Scale click coordinates to canvas internal resolution
+  const scaleX = canvasRef.value.width / rect.width;
+  const scaleY = canvasRef.value.height / rect.height;
+  const clickX = (e.clientX - rect.left) * scaleX;
+  const clickY = (e.clientY - rect.top) * scaleY;
+  animator.selectCharacterAt(clickX, clickY);
+}
+
+// ---- hover detection (mousemove tracks mouse position; the render loop
+//      checks it every frame and draws a glow behind the hovered character) ----
+let mouseX = -9999;
+let mouseY = -9999;
+
+function handleCanvasMove(e: MouseEvent): void {
+  if (!canvasRef.value) return;
+  const rect = canvasRef.value.getBoundingClientRect();
+  const scaleX = canvasRef.value.width / rect.width;
+  const scaleY = canvasRef.value.height / rect.height;
+  mouseX = (e.clientX - rect.left) * scaleX;
+  mouseY = (e.clientY - rect.top) * scaleY;
+}
+
+function handleCanvasLeave(): void {
+  mouseX = -9999;
+  mouseY = -9999;
+}
+
+/** Hit-test the current mouse position against Kirby and all bots. */
+function computeHover(): { type: "kirby" } | { type: "bot"; id: number } | null {
+  if (mouseX < 0) return null;
+
+  const rs = animator.buildRenderState();
+  // Kirby's canvas-space centre — only when Kirby is present
+  if (animator.kirbyEnabled) {
+    const kirbyCX = rs.canvasWidth / 2 + rs.charX;
+    const kirbyCY = rs.groundY + rs.charY;
+    const kirbyHitR = 25;
+    if (Math.hypot(kirbyCX - mouseX, kirbyCY - mouseY) <= kirbyHitR) {
+      return { type: "kirby" };
+    }
+  }
+
+  // Bots — bot.x is centre X, bot.y is feet Y
+  const bots = animator.bots as any[];
+  for (const bot of bots) {
+    const hitW = bot.w / 2 + 5;
+    const hitH = bot.h / 2 + 5;
+    if (
+      mouseX >= bot.x - hitW &&
+      mouseX <= bot.x + hitW &&
+      mouseY >= bot.y - hitH &&
+      mouseY <= bot.y + hitH
+    ) {
+      return { type: "bot", id: bot.id };
+    }
+  }
+  return null;
+}
+
+/** Draw a soft pink glow ring behind a character to signal hover. */
+function drawHoverGlow(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  radius: number,
+): void {
+  ctx.save();
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+  grad.addColorStop(0, "rgba(255, 105, 180, 0.0)");
+  grad.addColorStop(0.5, "rgba(255, 105, 180, 0.12)");
+  grad.addColorStop(0.8, "rgba(255, 105, 180, 0.35)");
+  grad.addColorStop(1, "rgba(255, 105, 180, 0.0)");
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.fill();
+  // inner ring for a brighter core
+  ctx.strokeStyle = "rgba(255, 105, 180, 0.5)";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius * 0.7, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
 
 let ctx: CanvasRenderingContext2D | null = null;
 let renderer: SpriteRenderer | null = null;
@@ -58,26 +143,40 @@ function animate(timestamp: number) {
   // Per-tick simulation (frame timing, physics, movement, inhale)
   const { frame, charCtx } = animator.step(deltaTime);
 
+  // Compute hover target before drawing characters
+  const hover = computeHover();
+
   // Onion skin layering: previous = below, current = 0, next = above
   const onionOffsetPx = animator.onionOffset * animator.scale * WORLD_SCALE;
   const showPrev = animator.onionMode === "prev" || animator.onionMode === "both";
   const showNext = animator.onionMode === "next" || animator.onionMode === "both";
 
-  if (showPrev) {
-    const prev = anim.frames[animator.frameIndex - 1];
-    if (prev) {
-      renderer.drawCharacter(prev, anim, renderState, -onionOffsetPx, 0,
-        animator.onionOpacity, "#00ff00");
-    }
+  // Draw hover glow behind Kirby if hovered (only when Kirby is present)
+  if (animator.kirbyEnabled && hover?.type === "kirby") {
+    const rs = animator.buildRenderState();
+    const kirbyCX = rs.canvasWidth / 2 + rs.charX;
+    const kirbyCY = rs.groundY + rs.charY;
+    drawHoverGlow(ctx, kirbyCX, kirbyCY - 15, 35);
   }
 
-  renderer.drawCharacter(frame, anim, renderState);
+  // Kirby is not drawn when kirbyEnabled is false
+  if (animator.kirbyEnabled) {
+    if (showPrev) {
+      const prev = anim.frames[animator.frameIndex - 1];
+      if (prev) {
+        renderer.drawCharacter(prev, anim, renderState, -onionOffsetPx, 0,
+          animator.onionOpacity, "#00ff00");
+      }
+    }
 
-  if (showNext) {
-    const next = anim.frames[animator.frameIndex + 1];
-    if (next) {
-      renderer.drawCharacter(next, anim, renderState, onionOffsetPx, 0,
-        animator.onionOpacity, "#ff0000");
+    renderer.drawCharacter(frame, anim, renderState);
+
+    if (showNext) {
+      const next = anim.frames[animator.frameIndex + 1];
+      if (next) {
+        renderer.drawCharacter(next, anim, renderState, onionOffsetPx, 0,
+          animator.onionOpacity, "#ff0000");
+      }
     }
   }
 
@@ -91,8 +190,16 @@ function animate(timestamp: number) {
   const viewport = animator.viewport;
   const groundY = animator.groundY();
   const botRenderStates = animator.getBotRenderState();
+  const botsList = animator.bots as any[];
   const anims = animationDataRaw.animations as Record<string, AnimationConfig>;
-  for (const botRS of botRenderStates) {
+  for (let i = 0; i < botRenderStates.length; i++) {
+    const botRS = botRenderStates[i];
+    const botObj = botsList[i];
+    // Draw hover glow behind this bot if it is hovered
+    if (hover?.type === "bot" && botObj && botObj.id === hover.id) {
+      const botHalfH = (botObj.h || 40) / 2;
+      drawHoverGlow(ctx, botRS.x, botRS.y - botHalfH, 35);
+    }
     const botAnim = anims[botRS.animState] ?? anims["idle"];
     if (botAnim) {
       const botFrame = botAnim.frames[botRS.animFrameIndex % botAnim.frames.length];
@@ -194,39 +301,5 @@ onUnmounted(() => {
   image-rendering: pixelated;
   image-rendering: crisp-edges;
   background: #87CEEB;
-}
-
-.ai-controls {
-  position: absolute;
-  top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  gap: 4px;
-  z-index: 100;
-  background: rgba(0,0,0,0.6);
-  border-radius: 8px;
-  padding: 4px 8px;
-}
-.ai-controls button {
-  background: rgba(255,255,255,0.15);
-  border: 1px solid rgba(255,255,255,0.3);
-  color: white;
-  padding: 4px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-}
-.ai-controls button:hover {
-  background: rgba(255,255,255,0.25);
-}
-.ai-controls button.active {
-  background: rgba(100,200,100,0.4);
-  border-color: rgba(100,200,100,0.7);
-}
-.ai-count {
-  color: #aaa;
-  font-size: 11px;
-  align-self: center;
 }
 </style>
