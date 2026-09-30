@@ -14,3 +14,7 @@ export {
 } from "./SpriteRenderer.ts";
 export { AnimatorController } from "./animator-controller.ts";
 export type { AnimatorControllerOptions } from "./animator-controller.ts";
+export { Enemy, EnemyType, EnemyState, EnemySpawner } from "./Enemy.ts";
+export type { EnemyConfig } from "./Enemy.ts";
+export { AIBot, BotState } from "./AIBot.ts";
+export type { AIBotConfig, BotAction, CharacterRef, BlockRef, EnemyRef } from "./AIBot.ts";

@@ -41,6 +41,17 @@ const GRAVITY_Y = -10; // downward in planck (Y-up) = downward in canvas (Y-down
 const VEL_ITER = 8;
 const POS_ITER = 3;
 
+// ---- collision filtering ----
+// Character collides with ground and blocks.
+// Blocks are static bodies, so the character cannot push them.
+// During inhale, blocks switch to kinematic (driven by InhaleField).
+const CAT_CHARACTER = 0x0001; // bit 0
+const CAT_BLOCK = 0x0002; // bit 1
+const CAT_GROUND = 0x0004; // bit 2
+const MASK_ALL = CAT_CHARACTER | CAT_BLOCK | CAT_GROUND; // 0x0007
+const MASK_GROUND = CAT_GROUND; // 0x0004
+const MASK_BLOCK = CAT_BLOCK | CAT_GROUND; // 0x0006 — character collides with blocks + ground
+
 /**
  * The physical world: a planck.World with ground bricks, spawned blocks,
  * and the character body.
@@ -114,7 +125,12 @@ export class PhysicsWorld {
       });
       body.createFixture(
         new planck.BoxShape(w * PX_TO_M / 2, h * PX_TO_M / 2),
-        { friction: 0.8, restitution: 0 },
+        {
+          friction: 0.8,
+          restitution: 0,
+          filterCategoryBits: CAT_GROUND,
+          filterMaskBits: MASK_ALL,
+        },
       );
       this.groundBodies.push(body);
 
@@ -141,14 +157,19 @@ export class PhysicsWorld {
     const cy = -h / 2 - Math.random() * SPAWN_HEIGHT_JITTER;
     const block = new GravityBlock(cx - w / 2, cy - h / 2, w, h);
 
-    // Create planck body
-    const body = this.world.createDynamicBody(
-      toPlank(cx, cy),
-    );
+    // Create planck body (dynamic + high density so blocks fall & collide
+    // with each other, but the character can't meaningfully push them)
+    const body = this.world.createDynamicBody(toPlank(cx, cy));
     body.setFixedRotation(true);
     body.createFixture(
       new planck.BoxShape(w * PX_TO_M / 2, h * PX_TO_M / 2),
-      { density: 0.005, friction: 0.3, restitution: 0 },
+      {
+        density: 1000, // 1000× heavier than character (density 1.6)
+        friction: 0.3,
+        restitution: 0,
+        filterCategoryBits: CAT_BLOCK,
+        filterMaskBits: MASK_ALL,
+      },
     );
     this.bodies.set(block, body);
 
@@ -202,7 +223,13 @@ export class PhysicsWorld {
       this.charBody.setLinearDamping(0);
       this.charBody.createFixture(
         new planck.BoxShape(w * PX_TO_M / 2, h * PX_TO_M / 2),
-        { density: 1.6, friction: 0, restitution: 0 },
+        {
+          density: 1.6,
+          friction: 0,
+          restitution: 0,
+          filterCategoryBits: CAT_CHARACTER,
+          filterMaskBits: MASK_ALL,
+        },
       );
     } else {
       // Update the body shape if the tight box changed
@@ -270,14 +297,15 @@ export class PhysicsWorld {
       );
     }
 
-    // 3. Sync block positions to bodies (for inhaled blocks)
+    // 3. Sync block body types.
+    // Inhaled blocks → kinematic (moved by InhaleField).
+    // Non-inhaled blocks → dynamic (fall via gravity, collide with each other).
     for (const block of this.blocks) {
       if (block.dead) continue;
       const body = this.bodies.get(block);
       if (!body) continue;
 
       if (block.inhale) {
-        // Inhaled blocks are moved by the InhaleField
         body.setKinematic();
         body.setLinearVelocity(new planck.Vec2(0, 0));
         body.setPosition(
@@ -291,18 +319,18 @@ export class PhysicsWorld {
     // 4. Step the world
     this.world.step(TIME_STEP, VEL_ITER, POS_ITER);
 
-    // 5. Sync body positions back to blocks
+    // 5. Sync body positions back to blocks (dynamic blocks only).
+    // Inhaled blocks are managed by InhaleField — skip them.
     for (const [block, body] of this.bodies) {
       if (block.dead) continue;
-      if (block.inhale) continue; // InhaleField manages position
+      if (block.inhale) continue;
 
       const pos = body.getPosition();
-      const vx = body.getLinearVelocity().x;
       const vy = body.getLinearVelocity().y;
 
       block.x = toCanvasX(pos.x) - block.w / 2;
       block.y = toCanvasY(pos.y) - block.h / 2;
-      block.vy = -toCanvasY(vy); // Convert back to canvas Y-down
+      block.vy = -toCanvasY(vy); // Convert plank Y to canvas Y-down
       block.resting = Math.abs(vy) < 0.01;
     }
 
@@ -329,7 +357,7 @@ export class PhysicsWorld {
       this.charPy = canvasY - offY - ctx.groundY;
       // Convert meters/second → pixels/second → pixels/tick
       this.charVx = toCanvasX(vel.x) / 60;
-      this.charVy = -toCanvasY(vel.y) / 60;
+      this.charVy = toCanvasY(vel.y) / 60;
     }
 
     // 7. Cull dead and off-screen blocks

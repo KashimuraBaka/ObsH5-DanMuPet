@@ -3,15 +3,19 @@ import { computed, markRaw, reactive, ref, watch } from "vue";
 import animationDataRaw from "../animations.json";
 import {
   AnimatorController,
+  AIBot,
   Character,
+  EnemySpawner,
   InhaleField,
   PhysicsWorld,
   computeLayout,
   INHALE_BODY_MULT,
+  CHAR_JUMP_IMPULSE,
   MIN_RUN_DISTANCE,
   WORLD_SCALE,
   type AnimationConfig,
   type CharContext,
+  type CharacterRef,
   type Frame,
   type RenderState,
   type SceneLayout,
@@ -158,6 +162,28 @@ export const useAnimatorStore = defineStore("animator", () => {
   const kirby = markRaw(new Character());
   const inhaleField = markRaw(new InhaleField());
   const spriteReady = ref(false);
+
+  // ---- enemies and AI bots ----
+  const enemies = ref<any[]>([]);
+  const bots = ref<any[]>([]);
+  const botEnabled = ref(false);
+  const enemyCount = ref(0);
+  const maxEnemies = 15;
+
+  // True while a direction key is held: the player is driving the character by
+  // hand, so the bots stand aside instead of acting out their own script.
+  const manualControl = ref(false);
+
+  // Id of the bot the player is driving by hand (manual takeover), or null.
+  // Only one bot can be driven at a time; while it is, that bot reads the held
+  // direction keys and the rest stay stood down, then all resume their own
+  // script the moment the direction keys come up.
+  const manualTakeoverId = ref<number | null>(null);
+
+  // One-shot flag: on the first rendered frame, snap Kirby to the ground so
+  // he does not start floating (snapToGround is not called by the state
+  // watcher because the state never *changes* on init).
+  let initialSnapDone = false;
 
   // ---- live readouts for the physics debug panel ----
   const stats = reactive({ blocks: 0, ground: 0, onGround: true });
@@ -317,6 +343,78 @@ export const useAnimatorStore = defineStore("animator", () => {
     world.clear();
   }
 
+  // ---- enemy and bot management ----
+  function spawnEnemy(): void {
+    if (enemies.value.length >= maxEnemies) return;
+    const enemy = new EnemySpawner().spawnRandom(
+      Math.random() * viewport.width,
+      groundY() - 50 - Math.random() * 100,
+    );
+    enemies.value.push(enemy);
+    enemyCount.value = enemies.value.length;
+  }
+
+  function spawnEnemies(count: number): void {
+    for (let i = 0; i < count; i++) spawnEnemy();
+  }
+
+  function spawnBot(name: string): void {
+    const bot = new AIBot({ name });
+    bot.x = viewport.width / 2 + (Math.random() - 0.5) * 200;
+    bot.y = groundY();
+    bots.value.push(bot);
+    botEnabled.value = true;
+  }
+
+  function toggleBot(): void {
+    botEnabled.value = !botEnabled.value;
+    if (!botEnabled.value) {
+      bots.value = [];
+      manualTakeoverId.value = null;
+    }
+  }
+
+  /**
+   * Take manual control of the given bot. Only one bot can be driven at a
+   * time: taking over a new bot releases the previous one. While a bot is
+   * driven the player's held direction keys move it and the other bots stand
+   * down; releasing the direction keys lets every bot back to its own script.
+   * Ignored while bots are disabled, so a stale id never drives a missing bot.
+   */
+  function takeoverBot(botId: number): void {
+    if (!botEnabled.value) return;
+    if (!(bots.value as AIBot[]).some((b) => b.id === botId)) return;
+    manualTakeoverId.value = botId;
+  }
+
+  /** Release manual control; the bots resume their own script next tick. */
+  function releaseTakeover(): void {
+    manualTakeoverId.value = null;
+  }
+
+  function clearEnemies(): void {
+    enemies.value = [];
+    enemyCount.value = 0;
+  }
+
+  function getBotRenderState(): Array<{
+    x: number;
+    y: number;
+    flip: boolean;
+    animState: string;
+    animFrameIndex: number;
+    name: string;
+  }> {
+    return bots.value.map((bot: any) => ({
+      x: bot.x,
+      y: bot.y,
+      flip: bot.dir === 1,
+      animState: bot.animState,
+      animFrameIndex: bot.animFrameIndex,
+      name: bot.name,
+    }));
+  }
+
   function setSpriteSheet(sheet: HTMLImageElement | null): void {
     kirby.setSpriteSheet(sheet);
     spriteReady.value = !!sheet;
@@ -351,7 +449,55 @@ export const useAnimatorStore = defineStore("animator", () => {
     }
   }
 
-  // ---- one simulation tick ----
+  /**
+   * The player's collision box in canvas coords, for the bots' soft collisions.
+   * Matches AIBot's own convention: `x` is the centre, `y` the feet.
+   */
+  function buildPlayerCollisionRef(frameData: Frame | undefined): CharacterRef | null {
+    if (!frameData || !spriteReady.value) return null;
+    const s = scale.value * WORLD_SCALE;
+    const tight = kirby.getTightBox(frameData);
+    const x = kirby.x + viewport.width / 2;
+    const feetY = groundY() + kirby.y;
+    return {
+      x,
+      y: feetY,
+      w: tight.bw * s,
+      h: tight.bh * s,
+      centreX: x,
+      centreY: feetY - (tight.bh * s) / 2,
+    };
+  }
+
+  /**
+   * Push each bot away from the player and the other bots. Runs after all bots
+   * have updated, so the AI's own movement and block collisions have already
+   * happened for this tick and only the character-to-character overlap is left.
+   */
+  function separateBots(frameData: Frame | undefined): void {
+    if (!botEnabled.value) return;
+    const botList = bots.value as AIBot[];
+    if (botList.length === 0) return;
+
+    const playerRef = buildPlayerCollisionRef(frameData);
+    for (const botA of botList) {
+      const others: CharacterRef[] = [];
+      if (playerRef) others.push(playerRef);
+      for (const botB of botList) {
+        if (botA === botB) continue;
+        others.push({
+          x: botB.x - botB.w / 2,
+          y: botB.y - botB.h,
+          w: botB.w,
+          h: botB.h,
+          centreX: botB.x,
+          centreY: botB.y - botB.h / 2,
+        });
+      }
+      botA.handleCharacterCollisions(others);
+    }
+  }
+
   function step(deltaTime: number): StepResult {
     const anim = getCurrentAnimation();
     let frameData = anim.frames[frameIndex.value];
@@ -375,6 +521,71 @@ export const useAnimatorStore = defineStore("animator", () => {
         viewport.height,
       );
       frameIndex.value = controller.frameIndex;
+
+      // First frame: snap to ground so Kirby does not start floating.
+      // The state watcher only fires on state *changes*, so it never fires
+      // for the initial "idle" state.
+      if (!initialSnapDone) {
+        initialSnapDone = true;
+        if (!kirby.isOnGround) {
+          kirby.snapToGround(groundY());
+        }
+      }
+    }
+
+    // Update enemies
+    const enemyList = enemies.value as any[];
+    const groundYVal = groundY();
+    for (const enemy of enemyList) {
+      if (enemy.dead) continue;
+      enemy.update(
+        deltaTime,
+        groundYVal,
+        world.allSolids().filter((b: any) => !b.dead),
+        kirby.x + viewport.width / 2, // player X position
+        groundYVal + kirby.y,         // player Y position
+      );
+    }
+    // Remove dead enemies
+    for (let i = enemyList.length - 1; i >= 0; i--) {
+      if (enemyList[i].dead) enemyList.splice(i, 1);
+    }
+    enemyCount.value = enemyList.length;
+
+    // Update bots
+    if (botEnabled.value) {
+      const botList = bots.value as AIBot[];
+      // The player's held direction, or 0 if none or if both ways are held.
+      let playerDir = 0;
+      if (heldDirKeys.size > 0) {
+        const leftHeld = [...heldDirKeys].some((k) => LEFT_KEYS.includes(k));
+        const rightHeld = [...heldDirKeys].some((k) => RIGHT_KEYS.includes(k));
+        if (leftHeld && !rightHeld) playerDir = -1;
+        else if (rightHeld && !leftHeld) playerDir = 1;
+      }
+      const takeoverId = manualTakeoverId.value;
+      // While a bot is being driven the player is occupied with it, so the
+      // other bots stand down too - the whole floor resumes once the direction
+      // keys come up.
+      const standDown = playerDir !== 0 || takeoverId !== null;
+
+      for (const bot of botList) {
+        bot.canvasWidth = viewport.width;
+        const driven = takeoverId !== null && bot.id === takeoverId;
+        bot.manualDriven = driven;
+        bot.manualDriveDir = playerDir;
+        bot.aiSuspended = standDown;
+        bot.update(
+          deltaTime,
+          groundYVal,
+          world.allSolids().filter((b: any) => !b.dead),
+          enemyList.filter((e: any) => !e.dead),
+          kirby.x + viewport.width / 2,
+          groundYVal + kirby.y,
+        );
+      }
+      // Then resolve bot↔player and bot↔bot overlaps (soft push).
+      separateBots(frameData);
     }
 
     uiStore.setSpriteName(frameData ? frameData.name : "");
@@ -433,6 +644,7 @@ export const useAnimatorStore = defineStore("animator", () => {
 
     if (direction !== null) {
       heldDirKeys.add(e.key);
+      manualControl.value = heldDirKeys.size > 0;
 
       // Mid-skid: a direction press only re-aims where the skid ends up, it
       // must not disturb the skid itself.
@@ -507,8 +719,8 @@ export const useAnimatorStore = defineStore("animator", () => {
           controller.previousMoveState = state.value;
           state.value =
             state.value === "walkWithEnemy" ? "jumpWithEnemy" : "jump";
-          kirby.jump(-10);
-          world.jump(-10);
+          kirby.jump(CHAR_JUMP_IMPULSE);
+          world.jump(CHAR_JUMP_IMPULSE);
         }
         break;
       case "x":
@@ -565,6 +777,7 @@ export const useAnimatorStore = defineStore("animator", () => {
     }
     if (LEFT_KEYS.includes(e.key) || RIGHT_KEYS.includes(e.key)) {
       heldDirKeys.delete(e.key);
+      manualControl.value = heldDirKeys.size > 0;
       // Another direction key may still be held (the usual way to turn
       // around): hand the walk over to the most recently pressed one that is
       // still down instead of stopping. Only a fully released direction stops
@@ -626,8 +839,8 @@ export const useAnimatorStore = defineStore("animator", () => {
       }
     }
     if (newState === "jump" || newState === "jumpWithEnemy") {
-      kirby.jump(-10);
-      world.jump(-10);
+      kirby.jump(CHAR_JUMP_IMPULSE);
+      world.jump(CHAR_JUMP_IMPULSE);
     }
     if (newState !== "slide") {
       // Left slide state: clear the auto-return guard
@@ -660,6 +873,13 @@ export const useAnimatorStore = defineStore("animator", () => {
     charBoxLabel,
     inhaleRangeLabel,
     spriteReady,
+    // enemies and bots
+    enemies,
+    bots,
+    botEnabled,
+    manualControl,
+    manualTakeoverId,
+    enemyCount,
     // engine
     world,
     kirby,
@@ -690,6 +910,15 @@ export const useAnimatorStore = defineStore("animator", () => {
     spawnGravityBlocks,
     clearBlocks,
     setSpriteSheet,
+    // enemy and bot actions
+    spawnEnemy,
+    spawnEnemies,
+    spawnBot,
+    toggleBot,
+    takeoverBot,
+    releaseTakeover,
+    clearEnemies,
+    getBotRenderState,
     setViewport,
     prevFrame,
     nextFrame,

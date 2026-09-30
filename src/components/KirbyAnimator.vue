@@ -1,6 +1,15 @@
 <template>
   <!-- Fullscreen stage: the canvas IS the page. All debug UI lives in DebugPanels. -->
   <div class="animator-container">
+    <!-- AI Controls -->
+    <div class="ai-controls">
+      <button @click="animator.spawnEnemy()" title="Spawn Enemy">👾</button>
+      <button @click="animator.spawnEnemies(3)" title="Spawn 3">👾×3</button>
+      <button @click="animator.spawnBot('Bot-A')" title="Spawn Bot" :class="{ active: animator.botEnabled }">🤖</button>
+      <button @click="animator.toggleBot()" title="Toggle Bot" :class="{ active: animator.botEnabled }">⏯</button>
+      <button @click="animator.clearEnemies()" title="Clear">🗑️</button>
+      <span class="ai-count">{{ animator.enemies.length }} enemies</span>
+    </div>
     <canvas
       ref="canvasRef"
       :width="animator.viewport.width"
@@ -13,6 +22,8 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from "vue";
 import { SpriteRenderer, WORLD_SCALE } from "../engine";
+import type { AnimationConfig } from "../engine";
+import animationDataRaw from "../animations.json";
 import { useAnimatorStore, usePanelStore } from "../stores";
 
 const animator = useAnimatorStore();
@@ -67,6 +78,33 @@ function animate(timestamp: number) {
     if (next) {
       renderer.drawCharacter(next, anim, renderState, onionOffsetPx, 0,
         animator.onionOpacity, "#ff0000");
+    }
+  }
+
+  // Draw enemies
+  for (const enemy of animator.enemies) {
+    if (enemy.dead) continue;
+    renderer.drawEnemy(enemy);
+  }
+
+  // Draw bots
+  const viewport = animator.viewport;
+  const groundY = animator.groundY();
+  const botRenderStates = animator.getBotRenderState();
+  const anims = animationDataRaw.animations as Record<string, AnimationConfig>;
+  for (const botRS of botRenderStates) {
+    const botAnim = anims[botRS.animState] ?? anims["idle"];
+    if (botAnim) {
+      const botFrame = botAnim.frames[botRS.animFrameIndex % botAnim.frames.length];
+      if (botFrame) {
+        const botRenderState = {
+          ...renderState,
+          charX: botRS.x - viewport.width / 2,
+          charY: botRS.y - groundY,
+          flip: botRS.flip,
+        };
+        renderer.drawCharacter(botFrame, botAnim, botRenderState);
+      }
     }
   }
 
@@ -156,5 +194,39 @@ onUnmounted(() => {
   image-rendering: pixelated;
   image-rendering: crisp-edges;
   background: #87CEEB;
+}
+
+.ai-controls {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  z-index: 100;
+  background: rgba(0,0,0,0.6);
+  border-radius: 8px;
+  padding: 4px 8px;
+}
+.ai-controls button {
+  background: rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.3);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.ai-controls button:hover {
+  background: rgba(255,255,255,0.25);
+}
+.ai-controls button.active {
+  background: rgba(100,200,100,0.4);
+  border-color: rgba(100,200,100,0.7);
+}
+.ai-count {
+  color: #aaa;
+  font-size: 11px;
+  align-self: center;
 }
 </style>

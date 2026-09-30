@@ -274,10 +274,31 @@ export class Character {
     const offX = (-ctx.frame.w * s) / 2 + tightCenterX * s;
     const offY = -ctx.frame.h * s + (tight.by + tight.bh / 2) * s;
 
-    // Check if the character is on the ground
+    // Check if the character is on the ground or on any solid block
     const canvasY = ctx.groundY + this._py + offY;
     const bottom = canvasY + (tight.bh * s) / 2;
-    const isOnGround = bottom >= ctx.groundY - 0.5;
+    const canvasX = ctx.canvasWidth / 2 + this._px + offX;
+    const charLeft = canvasX - (tight.bw * s) / 2;
+    const charRight = canvasX + (tight.bw * s) / 2;
+
+    let isOnGround = bottom >= ctx.groundY - 0.5;
+
+    if (!isOnGround) {
+      for (const block of world.allSolids()) {
+        if (block.dead) continue;
+        const blockTop = block.top;
+        const blockLeft = block.x;
+        const blockRight = block.x + block.w;
+        // Check vertical: bottom within 2px of block's top surface
+        if (Math.abs(bottom - blockTop) < 2) {
+          // Check horizontal overlap
+          if (charLeft < blockRight && charRight > blockLeft) {
+            isOnGround = true;
+            break;
+          }
+        }
+      }
+    }
 
     this._justLanded =
       !this._wasOnGround && isOnGround && this._prevVy > LAND_FALL_THRESHOLD;

@@ -15,4 +15,5 @@ yarn-debug.log*
 Thumbs.db
 .idea/
 .vscode/
+.bot-collision-verify/
 *.local
