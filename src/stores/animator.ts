@@ -701,22 +701,19 @@ export const useAnimatorStore = defineStore("animator", () => {
         controlled !== null && controlled !== "kirby" ? controlled : null;
       const standDown = playerDir !== 0;
 
-      // Compute leader position: the controlled bot, Kirby if enabled, or
-      // the scene centre as a fallback.
-      const fallbackX = kirbyEnabled.value
-        ? kirby.x + viewport.width / 2
-        : viewport.width / 2;
-      const fallbackY = kirbyEnabled.value
-        ? groundYVal + kirby.y
-        : groundYVal;
-      let leaderX = fallbackX;
-      let leaderY = fallbackY;
+      // Compute leader position: the controlled bot if one exists, Kirby if
+      // enabled, otherwise null (no leader → bots stay idle).
+      let leaderX: number | null = null;
+      let leaderY: number | null = null;
       if (controlledBotId !== null) {
         const leaderBot = botList.find((b) => b.id === controlledBotId);
         if (leaderBot) {
           leaderX = leaderBot.x;
           leaderY = leaderBot.y;
         }
+      } else if (kirbyEnabled.value) {
+        leaderX = kirby.x + viewport.width / 2;
+        leaderY = groundYVal + kirby.y;
       }
 
       for (const bot of botList) {
@@ -730,13 +727,16 @@ export const useAnimatorStore = defineStore("animator", () => {
         for (const e of enemyList) {
           if (e.lockedBy === bot.id) e.lockedBy = undefined;
         }
+        // If no leader, pass the bot's own position so it stays idle
+        const targetX = leaderX !== null ? leaderX : bot.x;
+        const targetY = leaderY !== null ? leaderY : bot.y;
         bot.update(
           deltaTime,
           groundYVal,
           world.allSolids().filter((b: any) => !b.dead),
           enemyList.filter((e: any) => !e.dead),
-          leaderX,
-          leaderY,
+          targetX,
+          targetY,
         );
         // Lock the bot's target so other bots skip it
         if (bot.targetEnemy) {
