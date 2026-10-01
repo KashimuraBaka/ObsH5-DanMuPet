@@ -43,6 +43,35 @@ const FRAME_DURATIONS: Record<string, number> = {
   swallow: 60,
 };
 
+// ---- Pathfinding constants ----
+/** Grid cell size in pixels for BFS/A* pathfinding. */
+const PATHFIND_CELL = 25;
+/** Re-run pathfinding every N frames (performance limit). */
+const PATHFIND_RECOMPUTE = 12;
+/** Max cells up the bot can jump (based on jumpImpulse ~80px peak). */
+const PATHFIND_JUMP_H = 3;
+/** Max horizontal cells the bot can travel during a jump. */
+const PATHFIND_JUMP_W = 4;
+/** Max cells the bot can fall in one step (gravity). */
+const PATHFIND_FALL_H = 8;
+/** Max A* nodes to expand before giving up (safety). */
+const PATHFIND_MAX_STEPS = 5000;
+
+// ---- Pathfinding types ----
+
+interface PathGrid {
+  cols: number;
+  rows: number;
+  blocked: Uint8Array;
+}
+
+interface PathNode {
+  gx: number;
+  gy: number;
+  g: number;
+  f: number;
+}
+
 // ---- Types ----
 
 export enum BotState {
@@ -215,6 +244,22 @@ export class AIBot {
   /** Timer (ms) tracking continuous blocked time before a dodge jump. */
   private blockedTimer = 0;
 
+  /** True if the bot was blocked horizontally by a block in the previous tick. */
+  private blockedByBlock = false;
+
+  /** True while the bot is in an AI-initiated jump arc (drifting over walls). */
+  private jumpArc = false;
+
+  // ---- Pathfinding state ----
+  /** Current path waypoints in canvas coordinates. */
+  private pathWaypoints: { x: number; y: number }[] | null = null;
+  /** Index of the current waypoint being followed. */
+  private pathIdx = 0;
+  /** Frame counter for path recomputation. */
+  private pathFrame = 0;
+  /** Key of the last target the path was computed for. */
+  private pathTargetKey = "";
+
   /** Threshold (ms) for continuous blocking before a dodge jump triggers. */
   private static readonly BLOCKED_JUMP_THRESHOLD = 1500;
 
@@ -229,6 +274,7 @@ export class AIBot {
 
     this.vy = this.config.jumpImpulse * 1.5;
     this.onGround = false;
+    this.jumpArc = true;
     this.setAnimState("jump");
     this.dodgeJumpCooldown = 500;
     this.blockedTimer = 0;
@@ -238,7 +284,7 @@ export class AIBot {
     this.config = {
       name: "Bot",
       speed: 2.5,
-      jumpImpulse: -7,
+      jumpImpulse: -8,
       chaseRange: 9999,
       attackRange: 60,
       gravity: 0.4,
@@ -350,7 +396,10 @@ export class AIBot {
     if (this.dodgeJumpCooldown > 0) this.dodgeJumpCooldown -= deltaTime;
 
     // State machine: decide what to do and set animState / vx
-    this.runStateMachine(deltaTime, enemies, playerX, playerY);
+    this.runStateMachine(deltaTime, enemies, playerX, playerY, blocks, groundY);
+
+    // Reset per-tick block flag (runStateMachine already read the previous tick's value)
+    this.blockedByBlock = false;
 
     // Apply gravity
     this.vy += this.config.gravity;
@@ -360,13 +409,31 @@ export class AIBot {
     this.x += this.vx;
     for (const block of blocks) {
       if (block.dead) continue;
+      // Skip ground bricks — the ground collision check handles them.
+      if (block.y >= groundY - 1) continue;
+      // During an AI-initiated jump arc, skip horizontal block collision so the
+      // bot can drift over walls. Vertical collision still applies below.
+      if (this.jumpArc) continue;
       if (this.overlapsBlock(block)) {
         if (this.vx > 0) {
           this.x = block.x - this.w / 2;
         } else if (this.vx < 0) {
           this.x = block.x + block.w + this.w / 2;
+        } else {
+          // Bot is overlapping with vx = 0 (pushed in by a previous collision
+          // or character shove). Push to the nearest horizontal edge, but only
+          // when there is a clear winner — pushing when the two sides are equal
+          // (bot exactly centred on the block) oscillates every tick.
+          const pushLeft = this.right - block.x;
+          const pushRight = block.x + block.w - this.left;
+          if (pushLeft < pushRight) {
+            this.x = block.x - this.w / 2;
+          } else if (pushRight < pushLeft) {
+            this.x = block.x + block.w + this.w / 2;
+          }
         }
         this.vx = 0;
+        this.blockedByBlock = true;
       }
     }
 
@@ -379,23 +446,43 @@ export class AIBot {
       this.y = groundY;
       this.vy = 0;
       this.onGround = true;
+      this.jumpArc = false;
     }
 
     // Block collision
     for (const block of blocks) {
       if (block.dead) continue;
+      // Skip ground bricks — the ground collision check handles them.
+      if (block.y >= groundY - 1) continue;
+      // During a jump arc, skip vertical block collision so marginal
+      // floating-point overlap does not trigger a head-bump that cancels
+      // the jump.  The bot is horizontally drifting through the block
+      // (horizontal collision is already skipped during jumpArc), so any
+      // vertical overlap is a false positive.
+      if (this.jumpArc) continue;
       if (this.overlapsBlock(block)) {
         if (this.vy > 0) {
           // Landing on top
           this.y = block.y;
           this.vy = 0;
           this.onGround = true;
+          this.jumpArc = false;
         } else if (this.vy < 0) {
           // Bumping head
           this.y = block.y + block.h + this.h;
           this.vy = 0;
         }
       }
+    }
+
+    // Clamp y after block collision — the block collision can push the bot
+    // below the ground (e.g., ceiling collision on a ground brick), and the
+    // ground collision above already ran. Re-check here.
+    if (this.y >= groundY) {
+      this.y = groundY;
+      this.vy = 0;
+      this.onGround = true;
+      this.jumpArc = false;
     }
 
     // ---- Blocked detection + dodge jump ----
@@ -439,20 +526,34 @@ export class AIBot {
   findNearestEnemy(enemies: EnemyRef[]): EnemyRef | null {
     let nearest: EnemyRef | null = null;
     let minDist = Infinity;
+    let fallback: EnemyRef | null = null;
+    let fallbackDist = Infinity;
 
     for (const e of enemies) {
       if (e.dead) continue;
-      if (e.lockedBy !== undefined && e.lockedBy !== this.id) continue;
       const dx = e.centreX - this.centreX;
       const dy = e.centreY - this.centreY;
       const dist = Math.hypot(dx, dy);
+
+      // Track the nearest enemy regardless of lock (fallback)
+      if (dist < fallbackDist) {
+        fallbackDist = dist;
+        fallback = e;
+      }
+
+      // Skip enemies locked by other bots
+      if (e.lockedBy !== undefined && e.lockedBy !== this.id) continue;
+
       if (dist < minDist) {
         minDist = dist;
         nearest = e;
       }
     }
 
-    return nearest;
+    // If no unlocked enemies are found, fall back to the nearest enemy
+    // regardless of lock status.  Without this, a bot with no locked enemy
+    // goes idle when all enemies are locked by other bots.
+    return nearest ?? fallback;
   }
 
   /**
@@ -493,7 +594,13 @@ export class AIBot {
     this.idleTimer = 0;
     this.attackTimer = 0;
     this.blockedTimer = 0;
+    this.blockedByBlock = false;
+    this.jumpArc = false;
     this.dodgeJumpCooldown = 0;
+    this.pathWaypoints = null;
+    this.pathIdx = 0;
+    this.pathFrame = 0;
+    this.pathTargetKey = "";
   }
 
   /**
@@ -682,6 +789,8 @@ export class AIBot {
     enemies: EnemyRef[],
     playerX: number,
     playerY: number,
+    blocks: BlockRef[],
+    groundY: number,
   ): void {
     // Manual takeover: the player drives this bot directly. Takes precedence
     // over aiSuspended (the host may have stood the whole floor down because a
@@ -724,7 +833,6 @@ export class AIBot {
       if (nearest && enemyDist <= this.config.chaseRange) {
         this.targetEnemy = nearest;
         this.state = BotState.CHASE;
-        this.dir = nearest.centreX > this.x ? 1 : -1;
 
         const targetHDist = Math.abs(this.targetEnemy.centreX - this.x);
         const targetVDist = Math.abs(this.targetEnemy.centreY - this.centreY);
@@ -738,18 +846,119 @@ export class AIBot {
           return;
         }
 
-        this.vx = this.dir * this.config.speed * 1.5;
-        this.setAnimState("run");
+        // Force path recomputation when the bot is blocked by a block — the
+        // current path may lead into a wall, so re-plan immediately.
+        if (this.blockedByBlock) {
+          this.pathFrame = PATHFIND_RECOMPUTE;
+        }
 
-        // Jump if the target is above the bot and the jump cooldown is ready.
-        if (this.onGround && this.jumpCooldown <= 0) {
-          const targetTop = this.targetEnemy.centreY - this.targetEnemy.h / 2;
-          if (
-            targetTop < this.top - 10 &&
-            targetHDist < this.config.chaseRange * 0.6
-          ) {
+        // Recompute path every PATHFIND_RECOMPUTE frames or when target changes
+        this.pathFrame++;
+        const tk =
+          `${Math.round(this.targetEnemy.centreX)}_${Math.round(this.targetEnemy.centreY)}`;
+        if (this.pathFrame >= PATHFIND_RECOMPUTE || this.pathTargetKey !== tk) {
+          this.computePath(
+            blocks,
+            groundY,
+            this.targetEnemy.centreX,
+            this.targetEnemy.centreY,
+          );
+          this.pathFrame = 0;
+          this.pathTargetKey = tk;
+        }
+
+        // Follow path waypoints if available, else direct movement toward enemy
+        let wp: { x: number; y: number } | null = null;
+        if (
+          this.pathWaypoints &&
+          this.pathIdx < this.pathWaypoints.length
+        ) {
+          // Skip waypoints the bot has already passed.  Do NOT skip waypoints
+          // that are above the bot — they are likely jump targets and skipping
+          // them would cause the bot to miss the jump.
+          while (this.pathIdx < this.pathWaypoints.length) {
+            const w = this.pathWaypoints[this.pathIdx];
+            const wdy = w.y - this.centreY;
+            if (wdy < -5) break; // waypoint is above the bot — don't skip
+            if (Math.hypot(w.x - this.centreX, w.y - this.centreY) > 10) break;
+            this.pathIdx++;
+          }
+          wp =
+            this.pathIdx < this.pathWaypoints.length
+              ? this.pathWaypoints[this.pathIdx]
+              : null;
+        }
+
+        if (wp) {
+          const dx = wp.x - this.centreX;
+          const dy = wp.y - this.centreY;
+          this.dir = dx > 0 ? 1 : -1;
+          this.vx = this.dir * this.config.speed * 1.5;
+
+          // While airborne in a jump arc, keep the run animation and maintain
+          // horizontal drift; the bot is following a parabolic arc.
+          if (this.jumpArc) {
+            this.setAnimState("jump");
+            return;
+          }
+
+          this.setAnimState("run");
+
+          // Jump when the next waypoint is above the bot.  Trigger the jump
+          // as soon as the bot is on the ground and the waypoint is elevated,
+          // or immediately when the bot is blocked by a block (stuck against
+          // a wall that needs to be jumped over).
+          if (this.onGround && this.jumpCooldown <= 0 && dy < -5) {
+            // Jump if horizontally close to the waypoint OR if blocked by a block
+            if (this.blockedByBlock || Math.abs(dx) < PATHFIND_CELL * 2.5) {
+              this.vy = this.config.jumpImpulse;
+              this.onGround = false;
+              this.jumpArc = true;
+              this.setAnimState("jump");
+              this.jumpCooldown = 500;
+            }
+          }
+          // If blocked by a block but the waypoint is NOT above, jump anyway as
+          // a last-resort dodge — the bot is stuck and needs to break free.
+          else if (this.onGround && this.jumpCooldown <= 0 && this.blockedByBlock) {
             this.vy = this.config.jumpImpulse;
             this.onGround = false;
+            this.jumpArc = true;
+            this.setAnimState("jump");
+            this.jumpCooldown = 500;
+          }
+        } else {
+          // No path — fallback to direct movement toward enemy
+          this.dir = nearest.centreX > this.x ? 1 : -1;
+          this.vx = this.dir * this.config.speed * 1.5;
+
+          // While airborne in a jump arc, maintain drift
+          if (this.jumpArc) {
+            this.setAnimState("jump");
+            return;
+          }
+
+          this.setAnimState("run");
+
+          // Jump if the target is above the bot and the jump cooldown is ready.
+          if (this.onGround && this.jumpCooldown <= 0) {
+            const targetTop = this.targetEnemy.centreY - this.targetEnemy.h / 2;
+            if (
+              targetTop < this.top - 10 &&
+              targetHDist < this.config.chaseRange * 0.6
+            ) {
+              this.vy = this.config.jumpImpulse;
+              this.onGround = false;
+              this.jumpArc = true;
+              this.setAnimState("jump");
+              this.jumpCooldown = 500;
+            }
+          }
+          // Blocked by a block with no path — jump as a dodge
+          else if (this.onGround && this.jumpCooldown <= 0 && this.blockedByBlock) {
+            this.vy = this.config.jumpImpulse;
+            this.onGround = false;
+            this.jumpArc = true;
             this.setAnimState("jump");
             this.jumpCooldown = 500;
           }
@@ -850,5 +1059,259 @@ export class AIBot {
         break;
       }
     }
+  }
+
+  // ---- Pathfinding ----
+
+  /**
+   * Build a path from the bot to a target using grid-based A*.
+   * The grid is marked with blocks as obstacles. Jumping and falling
+   * are modelled as multi-cell vertical moves.
+   */
+  private computePath(
+    blocks: BlockRef[],
+    groundY: number,
+    tx: number,
+    ty: number,
+  ): void {
+    const cols = Math.max(1, Math.ceil(this.canvasWidth / PATHFIND_CELL) + 1);
+    const rows = Math.max(1, Math.ceil(Math.max(groundY, 1) / PATHFIND_CELL) + 1);
+    const blocked = new Uint8Array(cols * rows);
+
+    // Mark cells overlapped by blocks (skip ground bricks — they are handled
+    // by the ground collision check and would block the entire ground row)
+    for (const b of blocks) {
+      if (b.dead) continue;
+      if (b.y >= groundY - 1) continue;
+      const bx1 = Math.max(0, Math.floor(b.x / PATHFIND_CELL));
+      const bx2 = Math.min(cols - 1, Math.floor((b.x + b.w) / PATHFIND_CELL));
+      const by1 = Math.max(0, Math.floor(b.y / PATHFIND_CELL));
+      const by2 = Math.min(rows - 1, Math.floor((b.y + b.h) / PATHFIND_CELL));
+      for (let cy = by1; cy <= by2; cy++) {
+        for (let cx = bx1; cx <= bx2; cx++) {
+          blocked[cy * cols + cx] = 1;
+        }
+      }
+    }
+
+    // Bot's cell (centre-based)
+    let sgx = Math.max(
+      0,
+      Math.min(cols - 1, Math.floor(this.x / PATHFIND_CELL)),
+    );
+    let sgy = Math.max(
+      0,
+      Math.min(
+        rows - 1,
+        Math.floor((this.y - this.h * 0.5) / PATHFIND_CELL),
+      ),
+    );
+    // Target's cell
+    let egx = Math.max(0, Math.min(cols - 1, Math.floor(tx / PATHFIND_CELL)));
+    let egy = Math.max(0, Math.min(rows - 1, Math.floor(ty / PATHFIND_CELL)));
+
+    // If start is blocked, find nearest free cell
+    if (blocked[sgy * cols + sgx]) {
+      const n = this.findNearestFree(blocked, cols, rows, sgx, sgy);
+      if (!n) {
+        this.pathWaypoints = null;
+        this.pathIdx = 0;
+        return;
+      }
+      sgx = n[0];
+      sgy = n[1];
+    }
+    // If end is blocked, find nearest free cell
+    if (blocked[egy * cols + egx]) {
+      const n = this.findNearestFree(blocked, cols, rows, egx, egy);
+      if (!n) {
+        this.pathWaypoints = null;
+        this.pathIdx = 0;
+        return;
+      }
+      egx = n[0];
+      egy = n[1];
+    }
+
+    const grid: PathGrid = { cols, rows, blocked };
+    const path = this.astar(grid, sgx, sgy, egx, egy);
+
+    if (!path || path.length === 0) {
+      this.pathWaypoints = null;
+      this.pathIdx = 0;
+      return;
+    }
+
+    // Convert grid cells to canvas waypoints (cell centres).
+    // Skip the first cell (start cell) — the bot is already there.
+    this.pathWaypoints = (path.length > 1 ? path.slice(1) : path).map((c) => ({
+      x: c.gx * PATHFIND_CELL + PATHFIND_CELL * 0.5,
+      y: c.gy * PATHFIND_CELL + PATHFIND_CELL * 0.5,
+    }));
+    this.pathIdx = 0;
+  }
+
+  /** A* search on the grid. Returns a list of grid cells from start to end. */
+  private astar(
+    grid: PathGrid,
+    sgx: number,
+    sgy: number,
+    egx: number,
+    egy: number,
+  ): { gx: number; gy: number }[] | null {
+    const { cols, rows, blocked } = grid;
+
+    if (blocked[sgy * cols + sgx] || blocked[egy * cols + egx]) return null;
+
+    const total = cols * rows;
+    const gScore = new Float32Array(total);
+    const cameFrom = new Int32Array(total);
+    const closed = new Uint8Array(total);
+    gScore.fill(Infinity);
+    cameFrom.fill(-1);
+
+    const startKey = sgy * cols + sgx;
+    const endKey = egy * cols + egx;
+    gScore[startKey] = 0;
+
+    const hfn = (x: number, y: number) =>
+      Math.abs(x - egx) + Math.abs(y - egy);
+
+    const open: PathNode[] = [];
+    open.push({ gx: sgx, gy: sgy, g: 0, f: hfn(sgx, sgy) });
+
+    let steps = 0;
+    while (open.length > 0 && steps < PATHFIND_MAX_STEPS) {
+      // Find node with lowest f
+      let mi = 0;
+      for (let i = 1; i < open.length; i++) {
+        if (open[i].f < open[mi].f) mi = i;
+      }
+      const cur = open[mi];
+      open.splice(mi, 1);
+
+      const curKey = cur.gy * cols + cur.gx;
+
+      // Skip stale entries: g-score has been improved since this entry was added.
+      // Use tolerance comparison because gScore is Float32Array and cur.g is Float64.
+      if (Math.abs(cur.g - gScore[curKey]) > 0.001) continue;
+
+      // Skip already-closed nodes (prevents redundant re-expansion)
+      if (closed[curKey]) continue;
+
+      steps++;
+      if (curKey === endKey) {
+        // Reconstruct path
+        const path: { gx: number; gy: number }[] = [];
+        let ck = curKey;
+        while (ck !== -1) {
+          path.unshift({ gx: ck % cols, gy: (ck / cols) | 0 });
+          ck = cameFrom[ck];
+        }
+        return path;
+      }
+
+      closed[curKey] = 1;
+
+      // Explore neighbours
+      const neighbours = this.getNeighbors(grid, cur.gx, cur.gy);
+      for (let ni = 0; ni < neighbours.length; ni++) {
+        const [nx, ny, cost] = neighbours[ni];
+        const nk = ny * cols + nx;
+        if (closed[nk]) continue;
+        const tg = cur.g + cost;
+        if (tg < gScore[nk]) {
+          gScore[nk] = tg;
+          cameFrom[nk] = curKey;
+          open.push({
+            gx: nx,
+            gy: ny,
+            g: tg,
+            f: tg + hfn(nx, ny),
+          });
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /** Generate valid neighbour cells from (x, y) with movement costs. */
+  private getNeighbors(
+    grid: PathGrid,
+    x: number,
+    y: number,
+  ): Array<[number, number, number]> {
+    const { cols, rows, blocked } = grid;
+    const result: Array<[number, number, number]> = [];
+
+    // Walk horizontally (left/right)
+    for (const dx of [-1, 1] as const) {
+      const nx = x + dx;
+      if (nx >= 0 && nx < cols && !blocked[y * cols + nx]) {
+        result.push([nx, y, 1]);
+      }
+    }
+
+    // Fall downward (gravity — bot can drop onto any free cell below)
+    for (let dy = 1; dy <= PATHFIND_FALL_H && y + dy < rows; dy++) {
+      const ny = y + dy;
+      if (blocked[ny * cols + x]) break; // can't fall through a block
+      result.push([x, ny, 1]);
+    }
+
+    // Jump upward (up to PATHFIND_JUMP_H cells, with horizontal drift)
+    for (let dy = 1; dy <= PATHFIND_JUMP_H; dy++) {
+      const ny = y - dy;
+      if (ny < 0) break;
+
+      // Check that no block sits directly above the start cell (vertical clearance)
+      let blockedPath = false;
+      for (let cy = y - 1; cy >= ny; cy--) {
+        if (blocked[cy * cols + x]) {
+          blockedPath = true;
+          break;
+        }
+      }
+      if (blockedPath) break; // Can't jump through a block; higher jumps won't work either
+
+      for (let dx = -PATHFIND_JUMP_W; dx <= PATHFIND_JUMP_W; dx++) {
+        const nx = x + dx;
+        if (nx >= 0 && nx < cols && !blocked[ny * cols + nx]) {
+          const cost = dy * 2 + Math.abs(dx);
+          result.push([nx, ny, cost]);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /** Find the nearest non-blocked cell to (cx, cy) within a small radius. */
+  private findNearestFree(
+    blocked: Uint8Array,
+    cols: number,
+    rows: number,
+    cx: number,
+    cy: number,
+  ): [number, number] | null {
+    for (let r = 1; r < 13; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const nx = cx + dx;
+          const ny = cy + dy;
+          if (
+            nx >= 0 &&
+            nx < cols &&
+            ny >= 0 &&
+            ny < rows &&
+            !blocked[ny * cols + nx]
+          ) {
+            return [nx, ny];
+          }
+        }
+      }
+    }
+    return null;
   }
 }

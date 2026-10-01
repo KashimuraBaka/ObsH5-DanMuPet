@@ -497,16 +497,17 @@ export const useAnimatorStore = defineStore("animator", () => {
       }
     }
 
-    // Check bots — bot.x and bot.y are already in canvas coordinates
+    // Check bots — bot.x is centre X, bot.y is bottom Y
     const botList = bots.value as AIBot[];
     for (const bot of botList) {
       const hitW = bot.w / 2 + 5;
       const hitH = bot.h / 2 + 5;
+      const centreY = bot.y - bot.h / 2;
       if (
         canvasX >= bot.x - hitW &&
         canvasX <= bot.x + hitW &&
-        canvasY >= bot.y - hitH &&
-        canvasY <= bot.y + hitH
+        canvasY >= centreY - hitH &&
+        canvasY <= centreY + hitH
       ) {
         controlledEntity.value = bot.id;
         takeoverMode.value = false;

@@ -566,8 +566,8 @@ export class SpriteRenderer {
     this.drawCharacter(frame, anim, botRenderState);
 
     // Name label above the bot
-    const cx = bot.x + bot.w / 2;
-    const topY = bot.y;
+    const cx = bot.x;
+    const topY = bot.y - bot.h;
     ctx.save();
     ctx.font = "bold 10px sans-serif";
     ctx.textAlign = "center";

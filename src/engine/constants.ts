@@ -116,3 +116,12 @@ export const BOT_MIN_SPACING = 8;
  * is clearly above or below.
  */
 export const BOT_COLLIDE_VERT_TOL = 4;
+
+// ---- character physics safety ----
+
+/**
+ * Maximum character speed in planck units (m/s). Prevents the character from
+ * tunneling through thin blocks at extreme velocities. Normal gameplay speeds
+ * (walk 2.4, run 3.6, slide 4.8, fall up to 21.6 m/s) are well below this cap.
+ */
+export const MAX_CHAR_SPEED_MS = 30;

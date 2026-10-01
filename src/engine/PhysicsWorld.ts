@@ -3,6 +3,7 @@ import { GravityBlock } from "./GravityBlock.ts";
 import {
   BLOCK_CULL_MARGIN,
   GROUND_OVERHANG,
+  MAX_CHAR_SPEED_MS,
   SPAWN_CLEARANCE,
   SPAWN_HEIGHT_JITTER,
   WORLD_SCALE,
@@ -38,8 +39,8 @@ function toCanvasY(plankY: number): number {
 // ---- physics constants ----
 const TIME_STEP = 1 / 60;
 const GRAVITY_Y = -10; // downward in planck (Y-up) = downward in canvas (Y-down)
-const VEL_ITER = 8;
-const POS_ITER = 3;
+const VEL_ITER = 10;
+const POS_ITER = 4;
 
 // ---- collision filtering ----
 // Character collides with ground and blocks.
@@ -75,6 +76,11 @@ export class PhysicsWorld {
   private bodies = new Map<GravityBlock, planck.Body>();
   /** The character body. */
   private charBody: planck.Body | null = null;
+  /** The character's collision fixture — rebuilt when the tight box changes. */
+  private charFixture: planck.Fixture | null = null;
+  /** Last fixture dimensions in canvas pixels, for change detection. */
+  private lastFixtureW = 0;
+  private lastFixtureH = 0;
 
   private groundKey = "";
   private _groundY = 0;
@@ -270,7 +276,8 @@ export class PhysicsWorld {
       );
       this.charBody.setFixedRotation(true);
       this.charBody.setLinearDamping(0);
-      this.charBody.createFixture(
+      this.charBody.setBullet(true); // Enable CCD to prevent tunneling
+      this.charFixture = this.charBody.createFixture(
         new planck.BoxShape(w * PX_TO_M / 2, h * PX_TO_M / 2),
         {
           density: 1.6,
@@ -280,8 +287,10 @@ export class PhysicsWorld {
           filterMaskBits: MASK_ALL,
         },
       );
+      this.lastFixtureW = w;
+      this.lastFixtureH = h;
     } else {
-      // Update the body shape if the tight box changed
+      // Update the body position if it moved
       const pos = this.charBody.getPosition();
       const canvasPos = { x: toCanvasX(pos.x), y: toCanvasY(pos.y) };
       const dx = canvasX - canvasPos.x;
@@ -290,6 +299,29 @@ export class PhysicsWorld {
         this.charBody.setPosition(
           toPlank(canvasX, canvasY),
         );
+        this.charBody.setAwake(true);
+      }
+
+      // Rebuild the fixture if the tight box dimensions changed (e.g. crouch→jump)
+      const dimTol = 0.5;
+      if (Math.abs(w - this.lastFixtureW) > dimTol || Math.abs(h - this.lastFixtureH) > dimTol) {
+        if (this.charFixture) {
+          this.charBody.destroyFixture(this.charFixture);
+          this.charFixture = null;
+        }
+        this.charFixture = this.charBody.createFixture(
+          new planck.BoxShape(w * PX_TO_M / 2, h * PX_TO_M / 2),
+          {
+            density: 1.6,
+            friction: 0,
+            restitution: 0,
+            filterCategoryBits: CAT_CHARACTER,
+            filterMaskBits: MASK_ALL,
+          },
+        );
+        this.lastFixtureW = w;
+        this.lastFixtureH = h;
+        this.charBody.setAwake(true);
       }
     }
 
@@ -299,6 +331,157 @@ export class PhysicsWorld {
   /** Get the character body. */
   getCharacterBody(): planck.Body | null {
     return this.charBody;
+  }
+
+  /**
+   * Post-solve manual AABB collision resolution against spawned physics blocks.
+   *
+   * The character body is dynamic but player-driven: every frame the body is
+   * teleported to the target position and its X velocity is overwritten from
+   * player input. Planck's solver tries to resolve collisions during world.step(),
+   * but the next frame's velocity overwrite undoes any horizontal correction.
+   * The solver can only push the character along the vertical axis (since the
+   * horizontal velocity is constantly reset), causing deep vertical penetration.
+   *
+   * This method runs after world.step() and before the character position sync.
+   * It reads the character body's actual post-step position (visual canvas
+   * coordinates, Y-down) and checks it against all non-dead spawned blocks.
+   * On overlap it pushes the character out along the velocity-aware axis (or
+   * minimum-penetration when stationary) by setting the body position directly.
+   * The velocity component along the resolution axis is zeroed to prevent
+   * re-entering the block on the same frame's remaining sync.
+   *
+   * The ground is NOT included here — it is handled by planck's solver (static
+   * body with friction). Including ground bricks previously caused the vertical
+   * correction to sink the character below the ground, and the ground correction
+   * that followed shoved it sideways, producing left-right oscillation.
+   *
+   * When the character is walking horizontally but not vertically (e.g. walking
+   * into a block on the ground), the vertical overlap is incidental — the
+   * character simply sits at the block's base. Pushing vertically here would
+   * sink the character below the ground, and the ground correction that follows
+   * would shove it sideways, producing oscillation. The vertical push is
+   * skipped in that case.
+   *
+   * The character is NOT changed to kinematic — that would break gravity and
+   * jumping. The existing VEL_ITER, POS_ITER, setBullet, and MAX_CHAR_SPEED_MS
+   * settings remain as additional safety layers.
+   */
+  private resolveCharacterBlockCollisions(
+    ctx: { canvasWidth: number; canvasHeight: number; groundY: number; flip: boolean; frame: { w: number; h: number }; scale: number },
+    tightBox: TightBox,
+    charVx: number,
+    charVy: number,
+  ): void {
+    if (!this.charBody) return;
+
+    const s = ctx.scale;
+    const halfW = (tightBox.bw * s) / 2;
+    const halfH = (tightBox.bh * s) / 2;
+
+    // Read the body's actual position after world.step(). Using the input
+    // charPx/charPy (pre-step) would be stale — the body has already moved
+    // during world.step(), so the overlap check would see the wrong position.
+    // Both the overlap check and push-out operate in visual canvas coordinates
+    // (Y-down), so no offX/offY conversion is needed here.
+    const pos = this.charBody.getPosition();
+    let centerX = toCanvasX(pos.x);
+    let centerY = toCanvasY(pos.y);
+
+    // Only process spawned physics blocks. The ground is handled by planck's
+    // solver (static body with friction); including it here caused the vertical
+    // correction to sink the character below the ground, and the ground
+    // correction that followed shoved it sideways — producing oscillation.
+    const solids = this.blocks;
+
+    for (const block of solids) {
+      if (block.dead) continue;
+
+      const blockLeft = block.x;
+      const blockRight = block.x + block.w;
+      const blockTop = block.y;
+      const blockBottom = block.y + block.h;
+
+      const charLeft = centerX - halfW;
+      const charRight = centerX + halfW;
+      const charTop = centerY - halfH;
+      const charBottom = centerY + halfH;
+
+      // Check AABB overlap (canvas Y-down)
+      if (
+        charRight <= blockLeft ||
+        charLeft >= blockRight ||
+        charBottom <= blockTop ||
+        charTop >= blockBottom
+      ) {
+        continue;
+      }
+
+      // Compute penetration depths — how far to push in each direction to clear
+      const pushLeft = charRight - blockLeft;
+      const pushRight = blockRight - charLeft;
+      const pushUp = charBottom - blockTop;
+      const pushDown = blockBottom - charTop;
+
+      // Resolve horizontal and vertical penetration independently.
+      // The original overlap check requires both X and Y overlap, so both
+      // axes are always overlapping here. Using velocity direction (not
+      // post-step body velocity, which the solver may have zeroed) ensures
+      // the push goes opposite to the approach direction. Falls back to
+      // minimum penetration when the character is nearly stationary.
+      // charVx/charVy are in pixels/tick (canvas coordinates, Y-down).
+      const velX = charVx;
+      const velY = charVy;
+      const velEps = 0.1; // px/tick — below minimum walk speed (2), above float noise
+
+      let zeroX = false;
+      let zeroY = false;
+
+      // --- Resolve horizontal penetration ---
+      // Use minimum-penetration (MTV) to determine the push direction.
+      // This is more robust than using movement direction, which can fail
+      // when the solver's position correction leaves the character on the
+      // wrong side of the block — the movement-direction approach would
+      // then push the character through the block, causing oscillation.
+      // A small epsilon pushes the character slightly past the block edge
+      // so floating-point precision cannot make the overlap check flip
+      // between true and false on consecutive frames.
+      const PUSH_EPS = 0.5; // px
+      if (pushLeft <= pushRight) {
+        centerX = blockLeft - halfW - PUSH_EPS;
+      } else {
+        centerX = blockRight + halfW + PUSH_EPS;
+      }
+      zeroX = true;
+
+      // --- Resolve vertical penetration ---
+      // When the character is moving horizontally but not vertically (e.g.
+      // walking into a block sitting on the ground), the vertical overlap is
+      // incidental — the character simply sits at the block's base. Pushing
+      // vertically here would sink the character below the ground, and the
+      // ground correction that follows would shove it sideways, producing
+      // oscillation. Skip the vertical push in that case.
+      if (Math.abs(velY) > velEps || Math.abs(velX) <= velEps) {
+        if (pushUp <= pushDown) {
+          centerY = blockTop - halfH - PUSH_EPS;
+        } else {
+          centerY = blockBottom + halfH + PUSH_EPS;
+        }
+        zeroY = true;
+      }
+
+      // Set body position in visual canvas coordinates (no offX/offY conversion
+      // needed — the overlap check and push-out are both in visual canvas space).
+      this.charBody.setPosition(toPlank(centerX, centerY));
+
+      // Zero velocity component along the resolution axis
+      if (zeroX || zeroY) {
+        const vel = this.charBody.getLinearVelocity();
+        if (zeroX) vel.x = 0;
+        if (zeroY) vel.y = 0;
+        this.charBody.setLinearVelocity(vel);
+      }
+    }
   }
 
   /**
@@ -341,8 +524,20 @@ export class PhysicsWorld {
     if (this.charBody) {
       const vel = this.charBody.getLinearVelocity();
       const vxPerSec = charVx * 60;
+      let newVelX = toPlankX(vxPerSec);
+      let newVelY = vel.y;
+
+      // Cap total speed to prevent tunneling through thin blocks.
+      const speedSq = newVelX * newVelX + newVelY * newVelY;
+      const maxSq = MAX_CHAR_SPEED_MS * MAX_CHAR_SPEED_MS;
+      if (speedSq > maxSq) {
+        const scale = MAX_CHAR_SPEED_MS / Math.sqrt(speedSq);
+        newVelX *= scale;
+        newVelY *= scale;
+      }
+
       this.charBody.setLinearVelocity(
-        new planck.Vec2(toPlankX(vxPerSec), vel.y),
+        new planck.Vec2(newVelX, newVelY),
       );
     }
 
@@ -372,7 +567,14 @@ export class PhysicsWorld {
     // Inhaled blocks are managed by InhaleField — skip them.
     this.syncBlocksFromBodies();
 
-    // 6. Sync character position back
+    // 6. Post-solve manual AABB collision resolution against spawned blocks.
+    // The character body is dynamic but player-driven: X velocity is overwritten
+    // every frame, which undoes the solver's horizontal correction. This manual
+    // pass reads the body's actual post-step position, checks it against spawned
+    // blocks, and pushes it out. The ground is left to planck's solver.
+    this.resolveCharacterBlockCollisions(ctx, tightBox, charVx, charVy);
+
+    // 7. Sync character position back
     if (this.charBody) {
       const pos = this.charBody.getPosition();
       const vel = this.charBody.getLinearVelocity();
@@ -398,7 +600,7 @@ export class PhysicsWorld {
       this.charVy = toCanvasY(vel.y) / 60;
     }
 
-    // 7. Cull dead and off-screen blocks
+    // 8. Cull dead and off-screen blocks
     for (let i = this.blocks.length - 1; i >= 0; i--) {
       const block = this.blocks[i];
       const gone =
