@@ -48,10 +48,13 @@ const FRAME_DURATIONS: Record<string, number> = {
 const PATHFIND_CELL = 25;
 /** Re-run pathfinding every N frames (performance limit). */
 const PATHFIND_RECOMPUTE = 12;
-/** Max cells up the bot can jump (based on jumpImpulse ~80px peak). */
-const PATHFIND_JUMP_H = 3;
-/** Max horizontal cells the bot can travel during a jump. */
-const PATHFIND_JUMP_W = 4;
+/** Max cells up the bot can jump (based on jumpImpulse=-10.5, gravity=0.4,
+ *  peak height = v²/2g ≈ 138px; 5 cells * 25px/cell = 125px, conservative). */
+const PATHFIND_JUMP_H = 5;
+/** Max horizontal cells the bot can travel during a jump.
+ *  Jump time = 2*|v|/g = 2*10.5/0.4 = 52.5 frames; horizontal drift =
+ *  52.5 * 3.75 ≈ 197px; 7 cells * 25px/cell = 175px (conservative). */
+const PATHFIND_JUMP_W = 7;
 /** Max cells the bot can fall in one step (gravity). */
 const PATHFIND_FALL_H = 8;
 /** Max A* nodes to expand before giving up (safety). */
@@ -284,7 +287,7 @@ export class AIBot {
     this.config = {
       name: "Bot",
       speed: 2.5,
-      jumpImpulse: -8,
+      jumpImpulse: -10.5,
       chaseRange: 9999,
       attackRange: 60,
       gravity: 0.4,
@@ -411,9 +414,14 @@ export class AIBot {
       if (block.dead) continue;
       // Skip ground bricks — the ground collision check handles them.
       if (block.y >= groundY - 1) continue;
-      // During an AI-initiated jump arc, skip horizontal block collision so the
-      // bot can drift over walls. Vertical collision still applies below.
-      if (this.jumpArc) continue;
+      // During an AI-initiated jump arc, skip horizontal block collision only
+      // when the bot is above the block (bot.bottom < block.y) — i.e. the bot
+      // is drifting over the wall.  If the bot is level with the block
+      // (jump not high enough), horizontal collision still applies so the bot
+      // cannot clip through the wall.  (When the bot is above, overlapsBlock
+      // already returns false because its vertical check is strict, so this
+      // skip is redundant but documents the intent.)
+      if (this.jumpArc && this.bottom < block.y) continue;
       if (this.overlapsBlock(block)) {
         if (this.vx > 0) {
           this.x = block.x - this.w / 2;
@@ -432,7 +440,9 @@ export class AIBot {
             this.x = block.x + block.w + this.w / 2;
           }
         }
-        this.vx = 0;
+        if (!this.jumpArc) {
+          this.vx = 0;
+        }
         this.blockedByBlock = true;
       }
     }
@@ -454,12 +464,11 @@ export class AIBot {
       if (block.dead) continue;
       // Skip ground bricks — the ground collision check handles them.
       if (block.y >= groundY - 1) continue;
-      // During a jump arc, skip vertical block collision so marginal
-      // floating-point overlap does not trigger a head-bump that cancels
-      // the jump.  The bot is horizontally drifting through the block
-      // (horizontal collision is already skipped during jumpArc), so any
-      // vertical overlap is a false positive.
-      if (this.jumpArc) continue;
+      // During a jump arc, skip only the head-bump case (vy < 0) so marginal
+      // floating-point overlap does not trigger a head-bump that cancels the
+      // jump.  Landing (vy > 0) is preserved so the bot can still land on top
+      // of a block while drifting through a jump arc.
+      if (this.jumpArc && this.vy < 0) continue;
       if (this.overlapsBlock(block)) {
         if (this.vy > 0) {
           // Landing on top
@@ -516,7 +525,27 @@ export class AIBot {
 
     // Face the way the bot really moved: AI intent + block stops. The soft
     // character collisions run after this and re-sync the same field.
-    this.syncFacing(this.x - tickStartX);
+    //
+    // Three cases skip the sync — in each, the AI already set `dir` in
+    // runStateMachine and `syncFacing` would override it based on movement
+    // displacement, causing oscillation:
+    //
+    // 1. Clamped by a block: the clamp pushes `this.x` back past `tickStartX`,
+    //    so `syncFacing` would flip `dir` every tick against the wall.
+    //
+    // 2. Jump arc: the bot drifts horizontally in a parabolic path; syncing
+    //    against the jump displacement would flip `dir` every frame.
+    //
+    // 3. Following a path: the bot moves toward waypoints which may be slightly
+    //    to the left or right of the bot's current position (especially when
+    //    clamped against a block edge). The AI already faces the target enemy;
+    //    syncing against waypoint movement would override it and cause
+    //    left-right oscillation.
+    const followingPath =
+      this.pathWaypoints && this.pathIdx < this.pathWaypoints.length;
+    if (!this.blockedByBlock && !this.jumpArc && !followingPath) {
+      this.syncFacing(this.x - tickStartX);
+    }
   }
 
   /**
@@ -708,6 +737,27 @@ export class AIBot {
       this.pushWalkTimer = 250;
     }
 
+    // Re-derive facing from the net displacement. Two cases skip the sync:
+    //
+    // 1. When the bot was clamped by a block in update() the clamp already
+    //    pushed it past its tick-start, so any additional shove would compound
+    //    the false displacement and flip `dir` every tick.
+    //
+    // 2. When the shove pushes the bot opposite to its intended direction
+    //    (e.g. chasing right while a character shoves it left). Without this
+    //    guard syncFacing would flip `dir` to -1 every shove, and the AI would
+    //    set it back to +1 next tick — oscillation. Keep the AI's target-facing
+    //    direction; the bot should face where it's trying to go, not where it
+    //   's being bumped.
+    if (this.blockedByBlock) return;
+    // Use `dir` (always set by the AI in runStateMachine) as the intended
+    // direction — it's always 1 or -1, representing where the bot wants to face.
+    if (
+      Math.sign(shovedX) !== this.dir &&
+      Math.abs(shovedX) > 0.5
+    ) {
+      return;
+    }
     this.syncFacing(this.x - (this.tickStartX ?? entryX));
   }
 
@@ -715,9 +765,17 @@ export class AIBot {
 
   /** Check AABB overlap between the bot and a block. */
   private overlapsBlock(block: BlockRef): boolean {
+    // Tiny horizontal epsilon to absorb sub-pixel floating-point drift at
+    // block edges.  Without it, a bot resting exactly on a block surface
+    // (right == block.x) can toggle overlapsBlock between true and false
+    // every tick, which would flip `blockedByBlock` on and off and fight
+    // the AI's target-facing direction.  Vertical checks stay tight so the
+    // bot still lands cleanly on block tops and bumps its head on block
+    // undersides.
+    const hx = 0.01;
     return (
-      this.left < block.x + block.w &&
-      this.right > block.x &&
+      this.left < block.x + block.w - hx &&
+      this.right > block.x + hx &&
       this.top < block.y + block.h &&
       this.bottom > block.y
     );
@@ -726,13 +784,18 @@ export class AIBot {
   /**
    * Face the direction the bot actually moved.
    *
-   * The AI picks `dir` from where it *wants* to go, but two things can move the
-   * bot the other way afterwards: a soft character collision shoves it back
+   * The AI picks `dir` from where it *wants* to go in runStateMachine, but a
+   * soft character collision can shove the bot the other way afterwards
    * (classically: the bot chases the player, the player steps into it, and the
-   * bot ends the tick sliding away from it while still facing it — the "walking
-   * backwards" bug), and a block clamps it in place. Either way the sprite has
-   * to match the net displacement, so `dir` is re-derived from its sign rather
-   * than from the intended velocity.
+   * bot ends the tick sliding away from it while still facing it — the
+   * "walking backwards" bug). When that happens the sprite has to match the
+   * net displacement, so `dir` is re-derived from its sign rather than from
+   * the intended velocity.
+   *
+   * Callers skip this method when the bot was clamped by a block: the clamp
+   * pushes `this.x` back past the tick start, which would flip `dir` every
+   * tick and make the sprite oscillate left-right against the wall. The AI's
+   * target-facing direction is kept instead.
    *
    * Pure in `delta`: update() passes the whole tick's displacement,
    * handleCharacterCollisions passes either the whole tick's (when update() ran
@@ -743,7 +806,22 @@ export class AIBot {
   private syncFacing(delta: number): void {
     // Stationary actions commit to a facing (they aim at their target) and are
     // never meant to walk, so a shove doesn't spin them around.
-    if (this.state === BotState.ATTACK || this.state === BotState.SWALLOW) return;
+    //
+    // CHASE also commits to the AI's target-facing direction: runStateMachine
+    // always sets `dir` to point at the target enemy, and syncing against
+    // actual movement displacement would flip `dir` whenever the bot's real
+    // displacement is opposite to the target — which happens when the bot is
+    // following a waypoint on the opposite side of the target, is clamped
+    // against a block edge, or is shoved by a character against the AI's
+    // intent.  The AI's target-facing direction wins; the bot should face
+    // where it's trying to go, not where it's being bumped.
+    if (
+      this.state === BotState.ATTACK ||
+      this.state === BotState.SWALLOW ||
+      this.state === BotState.CHASE
+    ) {
+      return;
+    }
 
     if (Math.abs(delta) < 0.05) return;
 
@@ -878,8 +956,15 @@ export class AIBot {
           // them would cause the bot to miss the jump.
           while (this.pathIdx < this.pathWaypoints.length) {
             const w = this.pathWaypoints[this.pathIdx];
+            const wdx = w.x - this.centreX;
             const wdy = w.y - this.centreY;
-            if (wdy < -5) break; // waypoint is above the bot — don't skip
+            // Skip waypoints the bot has already passed (more than 2 cells behind)
+            if (wdx < -PATHFIND_CELL * 2) {
+              this.pathIdx++;
+              continue;
+            }
+            // Don't skip waypoints that are above the bot — they are jump targets
+            if (wdy < -5) break;
             if (Math.hypot(w.x - this.centreX, w.y - this.centreY) > 10) break;
             this.pathIdx++;
           }
@@ -892,15 +977,50 @@ export class AIBot {
         if (wp) {
           const dx = wp.x - this.centreX;
           const dy = wp.y - this.centreY;
-          this.dir = dx > 0 ? 1 : -1;
-          this.vx = this.dir * this.config.speed * 1.5;
+          // Face the target enemy, not the waypoint. The waypoint determines
+          // movement direction, but facing should always be toward the target.
+          // This prevents oscillation when waypoints near block edges have a
+          // slightly different X than the bot's position, and also during a
+          // jump arc — the bot keeps facing its target even while following a
+          // parabolic path.
+          if (this.targetEnemy) {
+            this.dir = this.targetEnemy.centreX > this.x ? 1 : -1;
+          }
+          // If targetEnemy is null, keep current dir — don't flip based on
+          // waypoint. This prevents oscillation during multi-bot target swaps
+          // and when blocked by walls.
 
-          // While airborne in a jump arc, keep the run animation and maintain
-          // horizontal drift; the bot is following a parabolic arc.
+          // While airborne in a jump arc, keep the existing vx (set when the
+          // jump was triggered) and do not recalculate from the waypoint —
+          // recalculating vx every frame during a jump causes oscillation when
+          // the bot overshoots the waypoint horizontally.
           if (this.jumpArc) {
             this.setAnimState("jump");
             return;
           }
+
+          // Waypoint deadzone: when very close to a waypoint on the ground,
+          // stop and advance to the next waypoint.  The bot's speed (3.75px/
+          // frame) exceeds the old 10px skip threshold, so the bot overshoots
+          // the waypoint and moveDir flips every tick (vx oscillation).  A 5px
+          // deadzone lets the bot settle before advancing.
+          if (
+            this.onGround &&
+            Math.abs(dx) < 5 &&
+            Math.abs(dy) < 5
+          ) {
+            this.vx = 0;
+            this.pathIdx++;
+            this.setAnimState("run");
+            return;
+          }
+
+          // Move towards the waypoint regardless of facing direction.
+          // When dx is 0 the bot is aligned with the waypoint — do not flip
+          // direction (the old ternary `dx > 0 ? 1 : -1` returned -1 for dx=0,
+          // causing vx oscillation between +speed and -speed every frame).
+          const moveDir = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+          this.vx = moveDir * this.config.speed * 1.5;
 
           this.setAnimState("run");
 
@@ -910,7 +1030,10 @@ export class AIBot {
           // a wall that needs to be jumped over).
           if (this.onGround && this.jumpCooldown <= 0 && dy < -5) {
             // Jump if horizontally close to the waypoint OR if blocked by a block
-            if (this.blockedByBlock || Math.abs(dx) < PATHFIND_CELL * 2.5) {
+            if (this.blockedByBlock || Math.abs(dx) < PATHFIND_CELL * 3) {
+              // Ensure horizontal drift so the bot doesn't jump vertically in
+              // place (block collision may have zeroed vx on the previous tick).
+              this.vx = this.dir * this.config.speed * 1.5;
               this.vy = this.config.jumpImpulse;
               this.onGround = false;
               this.jumpArc = true;
@@ -921,6 +1044,7 @@ export class AIBot {
           // If blocked by a block but the waypoint is NOT above, jump anyway as
           // a last-resort dodge — the bot is stuck and needs to break free.
           else if (this.onGround && this.jumpCooldown <= 0 && this.blockedByBlock) {
+            this.vx = this.dir * this.config.speed * 1.5;
             this.vy = this.config.jumpImpulse;
             this.onGround = false;
             this.jumpArc = true;
@@ -928,8 +1052,12 @@ export class AIBot {
             this.jumpCooldown = 500;
           }
         } else {
-          // No path — fallback to direct movement toward enemy
-          this.dir = nearest.centreX > this.x ? 1 : -1;
+          // No path — fallback to direct movement toward enemy. Only update
+          // dir if we have a target; otherwise keep the current facing to
+          // avoid flipping on a null target.
+          if (nearest) {
+            this.dir = nearest.centreX > this.x ? 1 : -1;
+          }
           this.vx = this.dir * this.config.speed * 1.5;
 
           // While airborne in a jump arc, maintain drift
@@ -947,6 +1075,7 @@ export class AIBot {
               targetTop < this.top - 10 &&
               targetHDist < this.config.chaseRange * 0.6
             ) {
+              this.vx = this.dir * this.config.speed * 1.5;
               this.vy = this.config.jumpImpulse;
               this.onGround = false;
               this.jumpArc = true;
@@ -956,6 +1085,7 @@ export class AIBot {
           }
           // Blocked by a block with no path — jump as a dodge
           else if (this.onGround && this.jumpCooldown <= 0 && this.blockedByBlock) {
+            this.vx = this.dir * this.config.speed * 1.5;
             this.vy = this.config.jumpImpulse;
             this.onGround = false;
             this.jumpArc = true;
@@ -1089,6 +1219,17 @@ export class AIBot {
       const by2 = Math.min(rows - 1, Math.floor((b.y + b.h) / PATHFIND_CELL));
       for (let cy = by1; cy <= by2; cy++) {
         for (let cx = bx1; cx <= bx2; cx++) {
+          blocked[cy * cols + cx] = 1;
+        }
+      }
+    }
+
+    // Block cells whose centre lies at or below groundY — the bot cannot go
+    // below the ground surface, and waypoints below ground are unreachable,
+    // causing the bot to oscillate forever trying to approach them.
+    for (let cy = 0; cy < rows; cy++) {
+      if ((cy + 0.5) * PATHFIND_CELL >= groundY) {
+        for (let cx = 0; cx < cols; cx++) {
           blocked[cy * cols + cx] = 1;
         }
       }
