@@ -10,9 +10,13 @@ export {
 } from "./panels.ts";
 export {
   useAnimatorStore,
+  ALL_CHARACTERS,
+  MAGE_SKINS,
   KIRBY_STATES,
   PANEL_STATES,
   STATE_LABELS,
   type KirbyState,
+  type CharType,
+  type MageSkin,
   type StepResult,
 } from "./animator.ts";

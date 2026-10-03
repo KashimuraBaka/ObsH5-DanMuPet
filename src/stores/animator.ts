@@ -1,6 +1,37 @@
 import { defineStore } from "pinia";
 import { computed, markRaw, reactive, ref, watch } from "vue";
-import animationDataRaw from "../animations.json";
+import animationDataRaw from "../assets/sprites/animations.json";
+import angryAnimData from "../assets/sprites/angryAnimations.json";
+import basicAnimData from "../assets/sprites/basicAnimations.json";
+import blanketAnimData from "../assets/sprites/blanketAnimations.json";
+import dizzyAnimData from "../assets/sprites/dizzyAnimations.json";
+import drowsyAnimData from "../assets/sprites/drowsyAnimations.json";
+import eggAnimData from "../assets/sprites/eggAnimations.json";
+import glummyAnimData from "../assets/sprites/glummyAnimations.json";
+import happyAnimData from "../assets/sprites/happyAnimations.json";
+import mageAnimData from "../assets/sprites/mageAnimations.json";
+import sadAnimData from "../assets/sprites/sadAnimations.json";
+import scooterAnimData from "../assets/sprites/scooterAnimations.json";
+import shyAnimData from "../assets/sprites/shyAnimations.json";
+import sunglassAnimData from "../assets/sprites/sunglassAnimations.json";
+import twinkleAnimData from "../assets/sprites/twinkleAnimations.json";
+
+// Sprite sheet PNGs (bundled assets — Vite returns a URL string)
+import kirbySpriteSheet from "../assets/sprites/Kirby.png";
+import angrySpriteSheet from "../assets/sprites/Angry.png";
+import basicSpriteSheet from "../assets/sprites/Basic.png";
+import blanketSpriteSheet from "../assets/sprites/Blanket.png";
+import dizzySpriteSheet from "../assets/sprites/Dizzy.png";
+import drowsySpriteSheet from "../assets/sprites/Drowsy.png";
+import eggSpriteSheet from "../assets/sprites/Egg.png";
+import glummySpriteSheet from "../assets/sprites/Glummy.png";
+import happySpriteSheet from "../assets/sprites/Happy.png";
+import mageSpriteSheet from "../assets/sprites/Mage.png";
+import sadSpriteSheet from "../assets/sprites/Sad.png";
+import scooterSpriteSheet from "../assets/sprites/Scooter.png";
+import shySpriteSheet from "../assets/sprites/Shy.png";
+import sunglassSpriteSheet from "../assets/sprites/Sunglass.png";
+import twinkleSpriteSheet from "../assets/sprites/Twinkle.png";
 import {
   AnimatorController,
   AIBot,
@@ -40,6 +71,9 @@ export const KIRBY_STATES = [
   "brake",
   "coast",
   "jumpWithEnemy",
+  // Mage-specific states (only available when characterType === 'mage')
+  "dance",
+  "lie",
 ] as const;
 
 export type KirbyState = (typeof KIRBY_STATES)[number];
@@ -68,6 +102,8 @@ export const STATE_LABELS: Record<string, string> = {
   brake: "刹车",
   coast: "原地小跑",
   jumpWithEnemy: "吞敌跳跃",
+  dance: "跳舞",
+  lie: "躺下",
 };
 
 /** Keys the game consumes, so the browser never scrolls or opens quick-find. */
@@ -118,6 +154,23 @@ export interface StepResult {
   charCtx: CharContext | null;
 }
 
+/** Character types: 'kirby' (default) or 'mage' (魔界人, with skin variants). */
+export type CharType = "kirby" | "mage";
+
+/** Mage skin variants — all use the same Character class, only sprite sheet + animation data differ. */
+export type MageSkin =
+  | "angry" | "basic" | "blanket" | "dizzy" | "drowsy" | "egg"
+  | "glummy" | "happy" | "mage" | "sad" | "scooter" | "shy" | "sunglass" | "twinkle";
+
+/** All available character types (grouped). */
+export const ALL_CHARACTERS: readonly CharType[] = ["kirby", "mage"];
+
+/** All mage skin variants. */
+export const MAGE_SKINS: readonly MageSkin[] = [
+  "angry", "basic", "blanket", "dizzy", "drowsy", "egg",
+  "glummy", "happy", "mage", "sad", "scooter", "shy", "sunglass", "twinkle",
+];
+
 /**
  * The animator: engine instances, playback state, input and the state machine.
  *
@@ -131,6 +184,58 @@ export const useAnimatorStore = defineStore("animator", () => {
 
   // Reactive so X/Y/W/H edits in the frame editor invalidate computed values
   const animationData = reactive(animationDataRaw);
+
+  // ---- character type ----
+  // 'kirby' (default): uses animationData + Kirby.png
+  // 'mage' (魔界人): uses the selected skin's <char>Animations.json + <Char>.png
+  // All share the same Character class — no Mage subclass.
+  const characterType = ref<CharType>("kirby");
+  // Selected mage skin variant (only used when characterType === 'mage')
+  const mageSkin = ref<MageSkin>("mage");
+
+  /** Lookup table: skin name → animation data object. */
+  const characterAnimData: Record<string, any> = {
+    kirby: animationData,
+    angry: reactive(angryAnimData),
+    basic: reactive(basicAnimData),
+    blanket: reactive(blanketAnimData),
+    dizzy: reactive(dizzyAnimData),
+    drowsy: reactive(drowsyAnimData),
+    egg: reactive(eggAnimData),
+    glummy: reactive(glummyAnimData),
+    happy: reactive(happyAnimData),
+    mage: reactive(mageAnimData),
+    sad: reactive(sadAnimData),
+    scooter: reactive(scooterAnimData),
+    shy: reactive(shyAnimData),
+    sunglass: reactive(sunglassAnimData),
+    twinkle: reactive(twinkleAnimData),
+  };
+
+  /** Lookup table: skin name → sprite sheet URL (bundled asset). */
+  const characterSpriteSheets: Record<string, string> = {
+    kirby: kirbySpriteSheet,
+    angry: angrySpriteSheet,
+    basic: basicSpriteSheet,
+    blanket: blanketSpriteSheet,
+    dizzy: dizzySpriteSheet,
+    drowsy: drowsySpriteSheet,
+    egg: eggSpriteSheet,
+    glummy: glummySpriteSheet,
+    happy: happySpriteSheet,
+    mage: mageSpriteSheet,
+    sad: sadSpriteSheet,
+    scooter: scooterSpriteSheet,
+    shy: shySpriteSheet,
+    sunglass: sunglassSpriteSheet,
+    twinkle: twinkleSpriteSheet,
+  };
+
+  // Active animation data based on current character type + skin
+  const activeAnimationData = computed(() => {
+    if (characterType.value === "kirby") return animationData;
+    return characterAnimData[mageSkin.value] || characterAnimData["mage"] || animationData;
+  });
 
   // ---- playback / view state ----
   const state = ref<KirbyState>("idle");
@@ -235,11 +340,11 @@ export const useAnimatorStore = defineStore("animator", () => {
     return frame ? `${frame.name} (${frame.w}x${frame.h})` : "";
   });
 
-  const imageSize = computed(() => animationData.imageSize);
+  const imageSize = computed(() => activeAnimationData.value.imageSize);
   const animationCount = computed(
-    () => Object.keys(animationData.animations).length,
+    () => Object.keys(activeAnimationData.value.animations).length,
   );
-  const globalSpeed = computed(() => animationData.globalSpeed);
+  const globalSpeed = computed(() => activeAnimationData.value.globalSpeed);
 
   const sceneLayout = computed<SceneLayout>(() =>
     computeLayout(viewport.height),
@@ -268,7 +373,7 @@ export const useAnimatorStore = defineStore("animator", () => {
 
   // ---- animation lookup ----
   function getCurrentAnimation(): AnimationConfig {
-    const anims = animationData.animations as Record<string, AnimationConfig>;
+    const anims = activeAnimationData.value.animations as Record<string, AnimationConfig>;
     // The release-coast plays the run cycle as-is; only the ground speed
     // drops, so the legs keep running while he jogs to a stop.
     if (state.value === "coast") return anims.run;
@@ -548,6 +653,25 @@ export const useAnimatorStore = defineStore("animator", () => {
     viewport.width = width;
     viewport.height = height;
     rebuildGroundBlocks();
+  }
+
+  /** Switch between Kirby and Mage (魔界人). Skin stays unchanged. */
+  function setCharacterType(type: CharType): void {
+    characterType.value = type;
+    frameIndex.value = 0;
+    state.value = "idle";
+  }
+
+  /** Switch mage skin variant. Only applies when characterType === 'mage'. */
+  function setMageSkin(skin: MageSkin): void {
+    mageSkin.value = skin;
+    frameIndex.value = 0;
+  }
+
+  /** Current sprite sheet source URL based on character type + skin. */
+  function getSpriteSheetUrl(): string {
+    if (characterType.value === "kirby") return kirbySpriteSheet;
+    return characterSpriteSheets[mageSkin.value] || mageSpriteSheet;
   }
 
   // ---- frame editor ----
@@ -1086,6 +1210,9 @@ export const useAnimatorStore = defineStore("animator", () => {
     controller,
     // derived
     animationData,
+    characterType,
+    mageSkin,
+    activeAnimationData,
     isJumping,
     editingMode,
     stateLabel,
@@ -1127,6 +1254,9 @@ export const useAnimatorStore = defineStore("animator", () => {
     clearBots,
     getBotRenderState,
     setViewport,
+    setCharacterType,
+    setMageSkin,
+    getSpriteSheetUrl,
     prevFrame,
     nextFrame,
     copyAnimationJson,

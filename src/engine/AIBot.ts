@@ -6,7 +6,7 @@
  * Shares the game world with the main character (groundY, blocks, enemies).
  */
 
-import animationDataRaw from "../animations.json";
+import animationDataRaw from "../assets/sprites/animations.json";
 import {
   BOT_COLLIDE_MAX_RESOLVE,
   BOT_COLLIDE_SOFTNESS,

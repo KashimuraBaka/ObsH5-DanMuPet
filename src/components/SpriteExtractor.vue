@@ -109,6 +109,7 @@
 import { reactive, ref, computed, onMounted, onUnmounted } from 'vue'
 import { ViewTransform, SelectionModel, MinimapModel, MINIMAP_MAX_W, MINIMAP_MAX_H } from '../extractor'
 import type { ResizeHandle } from '../extractor'
+import kirbySpriteSheet from '../assets/sprites/Kirby.png'
 
 // The coordinate toolbar is a debug control panel: only shown with ?debug=true
 const isDebug = new URLSearchParams(window.location.search).get('debug') === 'true'
@@ -227,7 +228,7 @@ const hasSelection = computed(() => selectionModel.hasSelection)
 
 // Load the built-in Kirby.png
 function loadKirbyImage() {
-  loadImageFromSource('/Kirby.png', 'Kirby.png')
+  loadImageFromSource(kirbySpriteSheet, 'Kirby.png')
 }
 
 // Open the local file picker

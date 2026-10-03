@@ -64,11 +64,35 @@
       <div class="floating-panel-body" v-show="!panels.panels[def.id].collapsed">
         <!-- ---------- Animation controls ---------- -->
         <template v-if="def.id === 'controls'">
+          <!-- Character type selector -->
+          <div class="control-group">
+            <label>角色</label>
+            <div class="state-btn-group">
+              <button
+                v-for="c in ALL_CHARACTERS"
+                :key="c"
+                :class="['state-btn', { active: animator.characterType === c }]"
+                @click="animator.setCharacterType(c)"
+              >{{ c === 'kirby' ? 'Kirby' : '魔界人' }}</button>
+            </div>
+          </div>
+          <!-- Skin selector (only for mage) -->
+          <div v-if="animator.characterType === 'mage'" class="control-group">
+            <label>皮肤</label>
+            <div class="state-btn-group skin-list">
+              <button
+                v-for="s in MAGE_SKINS"
+                :key="s"
+                :class="['state-btn', { active: animator.mageSkin === s }]"
+                @click="animator.setMageSkin(s)"
+              >{{ s }}</button>
+            </div>
+          </div>
           <div class="control-group control-group-states">
             <label>状态</label>
             <div class="state-btn-group">
               <button
-                v-for="s in PANEL_STATES"
+                v-for="s in visibleStates"
                 :key="s"
                 :class="['state-btn', { active: animator.displayState === s }]"
                 @click="animator.state = s"
@@ -371,8 +395,10 @@
 </template>
 
 <script setup lang="ts">
-import { onUnmounted, ref, type CSSProperties } from 'vue'
+import { computed, onUnmounted, ref, type CSSProperties } from 'vue'
 import {
+  ALL_CHARACTERS,
+  MAGE_SKINS,
   PANEL_STATES,
   PANEL_DEFS,
   STATE_LABELS,
@@ -387,6 +413,20 @@ import {
 const ui = useUiStore()
 const panels = usePanelStore()
 const animator = useAnimatorStore()
+
+/**
+ * States to show in the panel, filtered by the current character type.
+ * Mage (魔界人) only supports: idle, walk, crouch, dance, lie.
+ * Kirby supports all KIRBY_STATES.
+ */
+const visibleStates = computed(() => {
+  if (animator.characterType === 'mage') {
+    return PANEL_STATES.filter(s =>
+      ['idle', 'walk', 'crouch', 'dance', 'lie'].includes(s)
+    )
+  }
+  return PANEL_STATES
+})
 
 /** Panel geometry, typed for Vue's :style binding. */
 function panelStyle(id: PanelId): CSSProperties {
@@ -969,6 +1009,33 @@ onUnmounted(() => {
   gap: 6px;
   flex: 1;
   min-width: 0;
+}
+
+/* Character list: scrollable, smaller buttons */
+.char-list {
+  max-height: 120px;
+  overflow-y: auto;
+  flex-direction: column;
+  align-content: flex-start;
+}
+
+.char-list .state-btn {
+  flex: 1;
+  text-align: center;
+  padding: 4px 6px;
+  font-size: 0.7em;
+}
+
+/* Skin list: wrap in a compact grid */
+.skin-list {
+  max-height: 100px;
+  overflow-y: auto;
+  gap: 4px;
+}
+
+.skin-list .state-btn {
+  padding: 3px 6px;
+  font-size: 0.65em;
 }
 
 .state-btn {

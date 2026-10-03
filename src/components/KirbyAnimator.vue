@@ -14,10 +14,9 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { SpriteRenderer, WORLD_SCALE } from "../engine";
 import type { AnimationConfig } from "../engine";
-import animationDataRaw from "../animations.json";
 import { useAnimatorStore, usePanelStore } from "../stores";
 
 const animator = useAnimatorStore();
@@ -76,11 +75,12 @@ function computeHover(): { type: "kirby" } | { type: "bot"; id: number } | null 
   for (const bot of bots) {
     const hitW = bot.w / 2 + 5;
     const hitH = bot.h / 2 + 5;
+    const centreY = bot.y - bot.h / 2;
     if (
       mouseX >= bot.x - hitW &&
       mouseX <= bot.x + hitW &&
-      mouseY >= bot.y - hitH &&
-      mouseY <= bot.y + hitH
+      mouseY >= centreY - hitH &&
+      mouseY <= centreY + hitH
     ) {
       return { type: "bot", id: bot.id };
     }
@@ -191,7 +191,7 @@ function animate(timestamp: number) {
   const groundY = animator.groundY();
   const botRenderStates = animator.getBotRenderState();
   const botsList = animator.bots as any[];
-  const anims = animationDataRaw.animations as Record<string, AnimationConfig>;
+  const anims = animator.activeAnimationData.animations as Record<string, AnimationConfig>;
   for (let i = 0; i < botRenderStates.length; i++) {
     const botRS = botRenderStates[i];
     const botObj = botsList[i];
@@ -239,9 +239,31 @@ function loadSpriteSheet(): Promise<HTMLImageElement> {
     const sheet = new Image();
     sheet.onload = () => resolve(sheet);
     sheet.onerror = reject;
-    sheet.src = "/Kirby.png";
+    sheet.src = animator.getSpriteSheetUrl();
   });
 }
+
+// Reload sprite sheet when character type changes
+watch(
+  () => animator.characterType,
+  async () => {
+    if (!ctx) return;
+    const sheet = await loadSpriteSheet();
+    animator.setSpriteSheet(sheet);
+    renderer?.setSpriteSheet(sheet);
+  },
+);
+
+// Reload sprite sheet when mage skin changes
+watch(
+  () => animator.mageSkin,
+  async () => {
+    if (!ctx || animator.characterType !== "mage") return;
+    const sheet = await loadSpriteSheet();
+    animator.setSpriteSheet(sheet);
+    renderer?.setSpriteSheet(sheet);
+  },
+);
 
 // Initialize canvas
 async function init() {
