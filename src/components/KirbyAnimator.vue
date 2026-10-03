@@ -15,14 +15,59 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
-import { SpriteRenderer, WORLD_SCALE } from "../engine";
-import type { AnimationConfig } from "../engine";
+import { SpriteRenderer, SPRITE_BASE_SCALE } from "../engine";
+import type { AnimationConfig, Frame } from "../engine";
 import { useAnimatorStore, usePanelStore } from "../stores";
 
 const animator = useAnimatorStore();
 const panels = usePanelStore();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+
+/**
+ * Compute the visible (tight-box) screen bounds of a frame.
+ *
+ * The sprite is drawn translated to (feetX, feetY) and then scaled by
+ * `effectiveScale`, with the frame's bottom edge aligned to the feet point.
+ * The tight box tells us where the actual rendered pixels sit inside that
+ * frame, so we offset the box center from the feet position accordingly.
+ *
+ * Returns the visible rectangle's centre + half-width/half-height in canvas
+ * pixels, suitable for positioning the hover glow.
+ */
+function frameScreenBox(
+  frame: Frame,
+  feetX: number,
+  feetY: number,
+  effectiveScale: number,
+  flip: boolean,
+): { cx: number; cy: number; halfW: number; halfH: number } | null {
+  // Reuse the Character's tight-box cache so we never re-rasterise a frame
+  // we have already analysed.
+  const tight = animator.kirby.getTightBox(frame);
+  const s = effectiveScale;
+
+  const halfW = (tight.bw * s) / 2;
+  const halfH = (tight.bh * s) / 2;
+
+  // Tight-box centre within the sprite frame (in source pixels).
+  const tightCenterXSrc = flip
+    ? frame.w - tight.bx - tight.bw / 2
+    : tight.bx + tight.bw / 2;
+  const tightCenterYSrc = tight.by + tight.bh / 2;
+
+  // The sprite is drawn with origin at feetY and centred horizontally on
+  // feetX, so the offset from the feet point to the tight-box centre is:
+  const offX = tightCenterXSrc - frame.w / 2;
+  const offY = tightCenterYSrc - frame.h;
+
+  return {
+    cx: feetX + offX * s,
+    cy: feetY + offY * s,
+    halfW,
+    halfH,
+  };
+}
 
 function handleCanvasClick(e: MouseEvent): void {
   if (!animator.takeoverMode || !canvasRef.value) return;
@@ -55,18 +100,23 @@ function handleCanvasLeave(): void {
   mouseY = -9999;
 }
 
-/** Hit-test the current mouse position against Kirby and all bots. */
+/** Hit-test the current mouse position against the player character and all bots. */
 function computeHover(): { type: "kirby" } | { type: "bot"; id: number } | null {
   if (mouseX < 0) return null;
 
-  const rs = animator.buildRenderState();
-  // Kirby's canvas-space centre — only when Kirby is present
+  // Player character — use the tight-box bounds (matches the rendered sprite
+  // regardless of characterScaleMultiplier so mage skins are hoverable too).
   if (animator.kirbyEnabled) {
-    const kirbyCX = rs.canvasWidth / 2 + rs.charX;
-    const kirbyCY = rs.groundY + rs.charY;
-    const kirbyHitR = 25;
-    if (Math.hypot(kirbyCX - mouseX, kirbyCY - mouseY) <= kirbyHitR) {
-      return { type: "kirby" };
+    const box = animator.getPlayerVisualBox();
+    if (box) {
+      if (
+        mouseX >= box.left &&
+        mouseX <= box.right &&
+        mouseY >= box.top &&
+        mouseY <= box.bottom
+      ) {
+        return { type: "kirby" };
+      }
     }
   }
 
@@ -146,17 +196,31 @@ function animate(timestamp: number) {
   // Compute hover target before drawing characters
   const hover = computeHover();
 
-  // Onion skin layering: previous = below, current = 0, next = above
-  const onionOffsetPx = animator.onionOffset * animator.scale * WORLD_SCALE;
+  // Onion skin layering: previous = below, current = 0, next = above.
+  // Offset is in canvas px = (frame count) * displayScale * SPRITE_BASE_SCALE.
+  const onionOffsetPx = animator.onionOffset * animator.displayScale * SPRITE_BASE_SCALE;
   const showPrev = animator.onionMode === "prev" || animator.onionMode === "both";
   const showNext = animator.onionMode === "next" || animator.onionMode === "both";
 
   // Draw hover glow behind Kirby if hovered (only when Kirby is present)
   if (animator.kirbyEnabled && hover?.type === "kirby") {
     const rs = animator.buildRenderState();
-    const kirbyCX = rs.canvasWidth / 2 + rs.charX;
-    const kirbyCY = rs.groundY + rs.charY;
-    drawHoverGlow(ctx, kirbyCX, kirbyCY - 15, 35);
+    const feetX = rs.canvasWidth / 2 + rs.charX;
+    const feetY = rs.groundY + rs.charY;
+    // Bots reset characterScaleMultiplier to 1.0, but the player character
+    // inherits the per-character multiplier (e.g. 0.22 for mage). Match that
+    // here so the glow sits on the same rendered pixels.
+    const effectiveScale =
+      rs.scale * (rs.characterScaleMultiplier ?? 1.0);
+    const box = frameScreenBox(frame, feetX, feetY, effectiveScale, rs.flip);
+    if (box) {
+      // Glow radius = long axis of the tight box plus a small breathing room.
+      const r = Math.max(box.halfW, box.halfH) + 6;
+      drawHoverGlow(ctx, box.cx, box.cy, r);
+    } else {
+      // Fallback: rough centre, fixed radius (only when no frame loaded yet)
+      drawHoverGlow(ctx, feetX, feetY - 15, 35);
+    }
   }
 
   // Kirby is not drawn when kirbyEnabled is false
@@ -192,27 +256,42 @@ function animate(timestamp: number) {
   const botRenderStates = animator.getBotRenderState();
   const botsList = animator.bots as any[];
   const anims = animator.activeAnimationData.animations as Record<string, AnimationConfig>;
+  // Bots always render at characterScaleMultiplier = 1.0, regardless of which
+  // character the player picked. Mirror that here so the glow matches.
+  const botEffectiveScale = renderState.scale;
   for (let i = 0; i < botRenderStates.length; i++) {
     const botRS = botRenderStates[i];
     const botObj = botsList[i];
-    // Draw hover glow behind this bot if it is hovered
-    if (hover?.type === "bot" && botObj && botObj.id === hover.id) {
-      const botHalfH = (botObj.h || 40) / 2;
-      drawHoverGlow(ctx, botRS.x, botRS.y - botHalfH, 35);
-    }
     const botAnim = anims[botRS.animState] ?? anims["idle"];
-    if (botAnim) {
-      const botFrame = botAnim.frames[botRS.animFrameIndex % botAnim.frames.length];
-      if (botFrame) {
-        const botRenderState = {
-          ...renderState,
-          charX: botRS.x - viewport.width / 2,
-          charY: botRS.y - groundY,
-          flip: botRS.flip,
-        };
-        renderer.drawCharacter(botFrame, botAnim, botRenderState);
+    if (!botAnim) continue;
+    const botFrame = botAnim.frames[botRS.animFrameIndex % botAnim.frames.length];
+    if (!botFrame) continue;
+
+    // Draw hover glow behind this bot if it is hovered.
+    // Position the glow on the tight-box centre of the bot's current frame
+    // so it tracks whichever sprite segment is currently visible.
+    if (hover?.type === "bot" && botObj && botObj.id === hover.id) {
+      const box = frameScreenBox(
+        botFrame,
+        botRS.x,
+        botRS.y,
+        botEffectiveScale,
+        botRS.flip,
+      );
+      if (box) {
+        const r = Math.max(box.halfW, box.halfH) + 6;
+        drawHoverGlow(ctx, box.cx, box.cy, r);
       }
     }
+
+    const botRenderState = {
+      ...renderState,
+      charX: botRS.x - viewport.width / 2,
+      charY: botRS.y - groundY,
+      flip: botRS.flip,
+      characterScaleMultiplier: 1.0,
+    };
+    renderer.drawCharacter(botFrame, botAnim, botRenderState);
   }
 
   // Physics debug overlay on the very top so it is never hidden by sprites

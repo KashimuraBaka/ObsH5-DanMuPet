@@ -52,7 +52,10 @@ export interface CharBox {
 export interface CharContext {
   /** The frame being displayed this tick. */
   frame: Frame;
-  /** Final on-screen scale, i.e. props.scale * WORLD_SCALE. */
+  /**
+   * Final on-screen scale for the sprite, in canvas pixels per source pixel.
+   * For Kirby (1x display): displayScale(1.0) * SPRITE_BASE_SCALE(2.0) = 2.0
+   */
   scale: number;
   /** Canvas Y of the ground surface. */
   groundY: number;

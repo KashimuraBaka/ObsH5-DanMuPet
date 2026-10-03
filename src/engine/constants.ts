@@ -8,6 +8,14 @@
 /** The world is drawn at 1/5 scale - MapleStory "small hero, big world" ratio. */
 export const WORLD_SCALE = 1 / 5;
 
+/**
+ * Default sprite scale at displayScale = 1.0.
+ * Combined with WORLD_SCALE this gives the canonical "1x" sprite scale:
+ *   final = displayScale * SPRITE_BASE_SCALE * characterScaleMultiplier
+ * For Kirby: 1.0 * 2.0 * 1.0 = 2.0 (matches the historical default).
+ */
+export const SPRITE_BASE_SCALE = 10 * WORLD_SCALE;
+
 /** Character gravity, in px per frame. */
 export const CHAR_GRAVITY = 0.5;
 /** Jump impulse, in px per frame (negative = up). */

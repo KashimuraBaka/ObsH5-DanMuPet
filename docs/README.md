@@ -216,6 +216,43 @@ watch(() => animator.mageSkin, async () => {
 });
 ```
 
+### 角色大小补偿
+
+魔界人精灵图原始分辨率（68×102）远大于 Kirby（20×18），在统一世界缩放下会显得过大。
+
+通过 `characterScaleMultiplier` 字段补偿：
+
+| 角色 | 倍数 | 说明 |
+|------|------|------|
+| Kirby | 1.0 | 不变 |
+| Mage | 0.22 | 缩小至接近 Kirby 大小 |
+
+实现方式：`RenderState` 新增 `characterScaleMultiplier` 可选字段，`drawCharacter` 将其乘入 `finalScale`。Bot 始终使用 1.0 倍率，保持视觉一致。
+
+### 缩放系统
+
+缩放系统由三层组成：
+
+```
+finalScale = displayScale × SPRITE_BASE_SCALE × characterScaleMultiplier
+```
+
+| 层 | 字段 | 默认值 | 作用 |
+|---|------|--------|------|
+| 用户缩放 | `displayScale` | 1.0 | "1x" = 当前默认视觉大小，"2x" = 2 倍 |
+| 基础缩放 | `SPRITE_BASE_SCALE` | 2.0 (= 10 × WORLD_SCALE) | 历史默认有效缩放 |
+| 角色补偿 | `characterScaleMultiplier` | 1.0 / 0.22 | 魔界人尺寸补偿 |
+
+实际生效示例：
+- Kirby @ 1x：1.0 × 2.0 × 1.0 = **2.0**
+- Kirby @ 2x：2.0 × 2.0 × 1.0 = **4.0**
+- Mage  @ 1x：1.0 × 2.0 × 0.22 = **0.44**
+- Mage  @ 2x：2.0 × 2.0 × 0.22 = **0.88**
+
+注：`worldSize = viewport.height × factor × WORLD_SCALE`（平台/砖块等世界几何仍用 `WORLD_SCALE`）。
+
+碰撞盒 (`buildPlayerCollisionRef`) 与精灵尺寸同步缩放，确保 `displayScale` 改变时碰撞行为正确。
+
 ### Bot 接管点击检测
 
 使用角色中心 Y 坐标进行点击检测（而非脚底 Y）：
@@ -230,3 +267,27 @@ if (
   mouseY <= centreY + hitH
 ) { /* 命中 */ }
 ```
+
+### 接管选择外发光
+
+接管模式下鼠标悬停在角色上时，会绘制一圈粉色发光圆环。该圆环的位置与半径**根据当前精灵图段的紧边界（tight box）计算**，而非硬编码偏移：
+
+```typescript
+function frameScreenBox(frame, feetX, feetY, scale, flip) {
+  const tight = animator.kirby.getTightBox(frame);  // 复用缓存的紧边界
+  const halfW = (tight.bw * scale) / 2;
+  const halfH = (tight.bh * scale) / 2;
+  const offX = (flip ? frame.w - tight.bx - tight.bw/2 : tight.bx + tight.bw/2) - frame.w/2;
+  const offY = tight.by + tight.bh/2 - frame.h;
+  return {
+    cx: feetX + offX * scale,
+    cy: feetY + offY * scale,
+    halfW, halfH,
+  };
+}
+```
+
+外发光半径 = `max(halfW, halfH) + 6`，始终贴合当前帧的实际像素范围。
+
+- **玩家角色**：使用当前 `frame` + `characterScaleMultiplier`
+- **Bot**：使用当前 `botFrame` + `characterScaleMultiplier = 1.0`（不受玩家角色影响）

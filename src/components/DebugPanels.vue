@@ -30,7 +30,7 @@
     <div class="dbg-line">STATE&nbsp;&nbsp;{{ animator.displayStateLabel }} <span class="dbg-dim">[{{ animator.displayState || '-' }}]</span></div>
     <div class="dbg-line" v-if="animator.controlledEntity === 'kirby'">FRAME&nbsp;&nbsp;{{ animator.currentFrameInfo }}</div>
     <div class="dbg-line">IMAGE&nbsp;&nbsp;{{ animator.imageSize.width }}×{{ animator.imageSize.height }}<span class="dbg-dim">&nbsp;&nbsp;ANIMS {{ animator.animationCount }}&nbsp;&nbsp;SPEED {{ animator.globalSpeed }}x</span></div>
-    <div class="dbg-line">SCALE&nbsp;&nbsp;{{ animator.scale }}x&nbsp;&nbsp;<span class="dbg-dim">{{ Math.round(animator.viewport.width) }}×{{ Math.round(animator.viewport.height) }}</span></div>
+    <div class="dbg-line">SCALE&nbsp;&nbsp;{{ animator.displayScale.toFixed(2) }}x&nbsp;&nbsp;<span class="dbg-dim">{{ Math.round(animator.viewport.width) }}×{{ Math.round(animator.viewport.height) }}</span></div>
   </div>
 
   <!-- ===== Every floating panel, rendered from one registry ===== -->
@@ -117,13 +117,13 @@
             <label>缩放</label>
             <input
               type="range"
-              v-model.number="animator.scale"
-              min="1"
-              max="25"
-              step="1"
+              v-model.number="animator.displayScale"
+              min="0.25"
+              max="4"
+              step="0.25"
               class="speed-slider"
             />
-            <span class="speed-value">{{ animator.scale }}x</span>
+            <span class="speed-value">{{ animator.displayScale }}x</span>
           </div>
           <div class="key-hints">
             <span>←/→ 移动</span>

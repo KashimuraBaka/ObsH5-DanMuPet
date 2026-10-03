@@ -21,8 +21,19 @@ export interface RenderState {
   bobOffset: number;
   /** True when the sprite is mirrored, which for a left-facing default means facing right. */
   flip: boolean;
-  /** Final on-screen scale, i.e. props.scale * WORLD_SCALE. */
+  /**
+   * Final on-screen scale for the sprite, in canvas pixels per source pixel.
+   * For Kirby (1x display): displayScale(1.0) * SPRITE_BASE_SCALE(2.0) = 2.0
+   * For Mage  (1x display): displayScale(1.0) * SPRITE_BASE_SCALE(2.0) * characterScaleMultiplier(0.22) ≈ 0.44
+   */
   scale: number;
+  /**
+   * Per-character visual scale multiplier.
+   * - 1.0 (default) for Kirby-sized sprites
+   * - <1.0 for high-resolution sprites (e.g. 0.28 for mage skins)
+   * Bots always pass 1.0 so they stay consistent regardless of player character.
+   */
+  characterScaleMultiplier?: number;
   groundY: number;
   canvasWidth: number;
   canvasHeight: number;
@@ -170,7 +181,8 @@ export class SpriteRenderer {
       ctx.globalAlpha = opacity;
     }
 
-    const finalScale = st.scale;
+    const charMult = st.characterScaleMultiplier ?? 1.0;
+    const finalScale = st.scale * charMult;
     // The clip's own default facing decides what "not flipped" means
     const shouldFlip = anim.defaultFacing === "left" ? st.flip : !st.flip;
 
@@ -556,12 +568,15 @@ export class SpriteRenderer {
     const { ctx } = this;
 
     // Draw the character sprite at the bot's position
-    // Bot's x/y are absolute canvas coords, convert to the render state's relative coords
+    // Bot's x/y are absolute canvas coords, convert to the render state's relative coords.
+    // Bots always render at Kirby size (characterScaleMultiplier reset to 1.0) so
+    // they remain visually consistent regardless of which character the player chose.
     const botRenderState: RenderState = {
       ...st,
       charX: bot.x - st.canvasWidth / 2,
       charY: bot.y - st.groundY,
       flip: bot.dir === 1,
+      characterScaleMultiplier: 1.0,
     };
     this.drawCharacter(frame, anim, botRenderState);
 

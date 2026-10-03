@@ -45,6 +45,7 @@ import {
   CHAR_JUMP_IMPULSE,
   MIN_RUN_DISTANCE,
   WORLD_SCALE,
+  SPRITE_BASE_SCALE,
   type AnimationConfig,
   type CharContext,
   type CharacterRef,
@@ -231,6 +232,21 @@ export const useAnimatorStore = defineStore("animator", () => {
     twinkle: twinkleSpriteSheet,
   };
 
+  /**
+   * Per-character-type scale multiplier.
+   *
+   * Mage sprites are drawn at much higher native resolution than Kirby's
+   * (~68×102 vs ~20×18), so they appear ~5× taller on screen at the same
+   * world scale. This multiplier compensates so mage appears roughly the
+   * same visual size as Kirby.
+   *
+   * Kirby = 1.0 (no change)
+   * Mage  = 0.22 (shrinks to Kirby-ish size)
+   */
+  const characterScaleMultiplier = computed(() => {
+    return characterType.value === "kirby" ? 1.0 : 0.22;
+  });
+
   // Active animation data based on current character type + skin
   const activeAnimationData = computed(() => {
     if (characterType.value === "kirby") return animationData;
@@ -240,10 +256,10 @@ export const useAnimatorStore = defineStore("animator", () => {
   // ---- playback / view state ----
   const state = ref<KirbyState>("idle");
   const speed = ref<number>(animationDataRaw.globalSpeed || 1.0);
-  // Sprite zoom. The world itself is drawn at 1/5 scale (WORLD_SCALE), so this
-  // multiplies on top of that - 10 keeps Kirby at his original size relative to
-  // the platform.
-  const scale = ref(10);
+  // Sprite display zoom: 1.0 = current default visual size, 2.0 = 2× bigger, 0.5 = ½.
+  // Final sprite scale = displayScale * SPRITE_BASE_SCALE * characterScaleMultiplier,
+  // where SPRITE_BASE_SCALE = 2.0 (the historical 10 * WORLD_SCALE default).
+  const displayScale = ref(1.0);
   const frameIndex = ref(0);
 
   // Canvas fills the page; kept in sync with the viewport size
@@ -276,9 +292,8 @@ export const useAnimatorStore = defineStore("animator", () => {
   const enemyCount = ref(0);
   const maxEnemies = 15;
 
-  // Kirby is not auto-generated on init; call spawnKirby() to bring him in.
-  // While false the canvas does not render him, bots / enemies target the
-  // scene centre instead of his position, and his physics is skipped.
+  // No player character is drawn by default. Calling setCharacterType
+  // (e.g. via the Kirby / 魔界人 buttons) enables it.
   const kirbyEnabled = ref(false);
 
   // True while a direction key is held: the player is driving the character by
@@ -411,7 +426,7 @@ export const useAnimatorStore = defineStore("animator", () => {
     if (!frameData) return null;
     return {
       frame: frameData,
-      scale: scale.value * WORLD_SCALE,
+      scale: displayScale.value * SPRITE_BASE_SCALE,
       groundY: groundY(),
       flip: shouldFlipChar(anim),
       canvasWidth: viewport.width,
@@ -426,7 +441,8 @@ export const useAnimatorStore = defineStore("animator", () => {
       charY: kirby.y,
       bobOffset: 0,
       flip: shouldFlipChar(),
-      scale: scale.value * WORLD_SCALE,
+      scale: displayScale.value * SPRITE_BASE_SCALE,
+      characterScaleMultiplier: characterScaleMultiplier.value,
       groundY: groundY(),
       canvasWidth: viewport.width,
       canvasHeight: viewport.height,
@@ -584,21 +600,27 @@ export const useAnimatorStore = defineStore("animator", () => {
   }
 
   /**
-   * Test a click position against Kirby and all bots. On hit, set the
-   * controlled entity and exit selection mode. Kirby uses a 25px hit radius;
-   * bots use their own half-extents plus 5px padding.
+   * Test a click position against the player character and all bots. On hit,
+   * set the controlled entity and exit selection mode.
+   *
+   * The player is hit-tested against its visible (tight-box) bounds so mage
+   * skins (drawn smaller than Kirby) are just as easy to click as Kirby.
    */
   function selectCharacterAt(canvasX: number, canvasY: number): void {
-    // Check Kirby first (priority when both overlap) — only when Kirby is enabled
+    // Check player first (priority when both overlap) — only when Kirby is enabled
     if (kirbyEnabled.value) {
-      const rs = buildRenderState();
-      const kirbyCanvasX = rs.canvasWidth / 2 + rs.charX;
-      const kirbyCanvasY = rs.groundY + rs.charY;
-      const kirbyDist = Math.hypot(kirbyCanvasX - canvasX, kirbyCanvasY - canvasY);
-      if (kirbyDist <= 25) {
-        controlledEntity.value = "kirby";
-        takeoverMode.value = false;
-        return;
+      const box = getPlayerVisualBox();
+      if (box) {
+        if (
+          canvasX >= box.left &&
+          canvasX <= box.right &&
+          canvasY >= box.top &&
+          canvasY <= box.bottom
+        ) {
+          controlledEntity.value = "kirby";
+          takeoverMode.value = false;
+          return;
+        }
       }
     }
 
@@ -658,6 +680,7 @@ export const useAnimatorStore = defineStore("animator", () => {
   /** Switch between Kirby and Mage (魔界人). Skin stays unchanged. */
   function setCharacterType(type: CharType): void {
     characterType.value = type;
+    kirbyEnabled.value = true;
     frameIndex.value = 0;
     state.value = "idle";
   }
@@ -703,7 +726,7 @@ export const useAnimatorStore = defineStore("animator", () => {
    */
   function buildPlayerCollisionRef(frameData: Frame | undefined): CharacterRef | null {
     if (!frameData || !spriteReady.value || !kirbyEnabled.value) return null;
-    const s = scale.value * WORLD_SCALE;
+    const s = displayScale.value * SPRITE_BASE_SCALE;
     const tight = kirby.getTightBox(frameData);
     const x = kirby.x + viewport.width / 2;
     const feetY = groundY() + kirby.y;
@@ -714,6 +737,54 @@ export const useAnimatorStore = defineStore("animator", () => {
       h: tight.bh * s,
       centreX: x,
       centreY: feetY - (tight.bh * s) / 2,
+    };
+  }
+
+  /**
+   * The player's visible (tight-box) bounds in canvas coords, accounting for
+   * `characterScaleMultiplier`. Used by the takeover hit-test so clicks land
+   * on the actually-rendered sprite, regardless of whether the player is
+   * Kirby (1.0×) or a mage skin (0.22×).
+   *
+   * Returns null when there is no frame to test against.
+   */
+  function getPlayerVisualBox(): {
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+    feetX: number;
+    feetY: number;
+  } | null {
+    const frameData = currentFrameData.value;
+    if (!frameData || !spriteReady.value) return null;
+    const tight = kirby.getTightBox(frameData);
+    const s = displayScale.value * SPRITE_BASE_SCALE * characterScaleMultiplier.value;
+    const flip = shouldFlipChar();
+
+    // Sprite is drawn translated to feet anchor, scaled by `s`, with the
+    // frame's bottom edge at the feet anchor and centred horizontally.
+    const halfW = (tight.bw * s) / 2;
+    const halfH = (tight.bh * s) / 2;
+
+    const tightCenterXSrc = flip
+      ? frameData.w - tight.bx - tight.bw / 2
+      : tight.bx + tight.bw / 2;
+    const tightCenterYSrc = tight.by + tight.bh / 2;
+
+    const feetX = viewport.width / 2 + kirby.x;
+    const feetY = groundY() + kirby.y;
+
+    const offX = tightCenterXSrc - frameData.w / 2;
+    const offY = tightCenterYSrc - frameData.h;
+
+    return {
+      left: feetX + offX * s - halfW,
+      right: feetX + offX * s + halfW,
+      top: feetY + offY * s - halfH,
+      bottom: feetY + offY * s + halfH,
+      feetX,
+      feetY,
     };
   }
 
@@ -899,7 +970,7 @@ export const useAnimatorStore = defineStore("animator", () => {
       frameData && spriteReady.value
         ? (() => {
             const t = kirby.getTightBox(frameData);
-            const s = scale.value * WORLD_SCALE;
+            const s = displayScale.value * SPRITE_BASE_SCALE;
             return `${Math.round(t.bw * s)}×${Math.round(t.bh * s)}`;
           })()
         : "-";
@@ -1182,7 +1253,7 @@ export const useAnimatorStore = defineStore("animator", () => {
     // state
     state,
     speed,
-    scale,
+    displayScale,
     frameIndex,
     viewport,
     onionMode,
@@ -1250,6 +1321,7 @@ export const useAnimatorStore = defineStore("animator", () => {
     toggleBot,
     toggleTakeoverMode,
     selectCharacterAt,
+    getPlayerVisualBox,
     clearEnemies,
     clearBots,
     getBotRenderState,
