@@ -17,3 +17,6 @@ Thumbs.db
 .vscode/
 .bot-collision-verify/
 *.local
+
+# test data & scripts
+tests/

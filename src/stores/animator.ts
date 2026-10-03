@@ -1,37 +1,37 @@
 import { defineStore } from "pinia";
 import { computed, markRaw, reactive, ref, watch } from "vue";
-import animationDataRaw from "../assets/sprites/animations.json";
-import angryAnimData from "../assets/sprites/angryAnimations.json";
-import basicAnimData from "../assets/sprites/basicAnimations.json";
-import blanketAnimData from "../assets/sprites/blanketAnimations.json";
-import dizzyAnimData from "../assets/sprites/dizzyAnimations.json";
-import drowsyAnimData from "../assets/sprites/drowsyAnimations.json";
-import eggAnimData from "../assets/sprites/eggAnimations.json";
-import glummyAnimData from "../assets/sprites/glummyAnimations.json";
-import happyAnimData from "../assets/sprites/happyAnimations.json";
-import mageAnimData from "../assets/sprites/mageAnimations.json";
-import sadAnimData from "../assets/sprites/sadAnimations.json";
-import scooterAnimData from "../assets/sprites/scooterAnimations.json";
-import shyAnimData from "../assets/sprites/shyAnimations.json";
-import sunglassAnimData from "../assets/sprites/sunglassAnimations.json";
-import twinkleAnimData from "../assets/sprites/twinkleAnimations.json";
+import animationDataRaw from "../assets/sprites/kirby.json";
+import angryAnimData from "../assets/sprites/mage/angry.json";
+import basicAnimData from "../assets/sprites/mage/basic.json";
+import blanketAnimData from "../assets/sprites/mage/blanket.json";
+import dizzyAnimData from "../assets/sprites/mage/dizzy.json";
+import drowsyAnimData from "../assets/sprites/mage/drowsy.json";
+import eggAnimData from "../assets/sprites/mage/egg.json";
+import glummyAnimData from "../assets/sprites/mage/glummy.json";
+import happyAnimData from "../assets/sprites/mage/happy.json";
+import mageAnimData from "../assets/sprites/mage/mage.json";
+import sadAnimData from "../assets/sprites/mage/sad.json";
+import scooterAnimData from "../assets/sprites/mage/scooter.json";
+import shyAnimData from "../assets/sprites/mage/shy.json";
+import sunglassAnimData from "../assets/sprites/mage/sunglass.json";
+import twinkleAnimData from "../assets/sprites/mage/twinkle.json";
 
 // Sprite sheet PNGs (bundled assets — Vite returns a URL string)
 import kirbySpriteSheet from "../assets/sprites/Kirby.png";
-import angrySpriteSheet from "../assets/sprites/Angry.png";
-import basicSpriteSheet from "../assets/sprites/Basic.png";
-import blanketSpriteSheet from "../assets/sprites/Blanket.png";
-import dizzySpriteSheet from "../assets/sprites/Dizzy.png";
-import drowsySpriteSheet from "../assets/sprites/Drowsy.png";
-import eggSpriteSheet from "../assets/sprites/Egg.png";
-import glummySpriteSheet from "../assets/sprites/Glummy.png";
-import happySpriteSheet from "../assets/sprites/Happy.png";
-import mageSpriteSheet from "../assets/sprites/Mage.png";
-import sadSpriteSheet from "../assets/sprites/Sad.png";
-import scooterSpriteSheet from "../assets/sprites/Scooter.png";
-import shySpriteSheet from "../assets/sprites/Shy.png";
-import sunglassSpriteSheet from "../assets/sprites/Sunglass.png";
-import twinkleSpriteSheet from "../assets/sprites/Twinkle.png";
+import angrySpriteSheet from "../assets/sprites/mage/Angry.png";
+import basicSpriteSheet from "../assets/sprites/mage/Basic.png";
+import blanketSpriteSheet from "../assets/sprites/mage/Blanket.png";
+import dizzySpriteSheet from "../assets/sprites/mage/Dizzy.png";
+import drowsySpriteSheet from "../assets/sprites/mage/Drowsy.png";
+import eggSpriteSheet from "../assets/sprites/mage/Egg.png";
+import glummySpriteSheet from "../assets/sprites/mage/Glummy.png";
+import happySpriteSheet from "../assets/sprites/mage/Happy.png";
+import mageSpriteSheet from "../assets/sprites/mage/Mage.png";
+import sadSpriteSheet from "../assets/sprites/mage/Sad.png";
+import scooterSpriteSheet from "../assets/sprites/mage/Scooter.png";
+import shySpriteSheet from "../assets/sprites/mage/Shy.png";
+import sunglassSpriteSheet from "../assets/sprites/mage/Sunglass.png";
+import twinkleSpriteSheet from "../assets/sprites/mage/Twinkle.png";
 import {
   AnimatorController,
   AIBot,
