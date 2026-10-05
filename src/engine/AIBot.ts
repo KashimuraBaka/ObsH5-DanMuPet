@@ -4,33 +4,65 @@
  * Standalone kinematic entity (no planck.js, no Character.ts, no PhysicsWorld.ts).
  * Uses simple AABB collision against ground and blocks.
  * Shares the game world with the main character (groundY, blocks, enemies).
+ *
+ * The behaviour model follows the original game's shape: one per-frame
+ * pipeline that (1) asks a decision function what to do, (2) integrates the
+ * resulting *intent*, (3) resolves collisions, and (4) advances the sprite.
+ * The AI never writes x/y/vy directly outside of jump initiation — see
+ * `runStateMachine` and `runPatrol` for the rules that keep it that way.
  */
 
-import animationDataRaw from "../assets/sprites/kirby.json";
+import defaultAnimDataRaw from "../assets/sprites/kirby.json";
 import {
   BOT_COLLIDE_MAX_RESOLVE,
   BOT_COLLIDE_SOFTNESS,
   BOT_COLLIDE_VERT_TOL,
+  BOT_INHALE_DAMAGE,
+  BOT_INHALE_REHIT_MS,
+  BOT_LAST_SEEN_MS,
+  BOT_LEDGE_GROUND_BAND_PX,
+  BOT_LEDGE_LOOKAHEAD_PX,
+  BOT_LEDGE_PROBE_HALF_PX,
+  BOT_LEDGE_STEP_DOWN_PX,
   BOT_MIN_SPACING,
+  BOT_ROAM_RANGE_PX,
+  BOT_ROAM_TURN_MS,
+  BOT_WORLD_SEED,
+  FOLLOW_SLOT_SETTLE_PX,
 } from "./constants.ts";
+import { hashSeed, makeRng, pickWeighted } from "./botRandom.ts";
+import {
+  PATROL_CLIPS,
+  PATROL_CLIP_WEIGHTS,
+  type MotionClip,
+} from "./motionClips.ts";
+import type { DamageKind } from "./types.ts";
 
 // ---- Animation metadata helpers ----
 
-const animData = animationDataRaw as {
+/**
+ * Shape a bot needs from an animation dataset: just enough to know how many
+ * frames a clip has and whether it loops.
+ */
+export interface BotAnimData {
   animations: Record<
     string,
     { frames: unknown[]; loop: boolean; frameDurationMs: number }
   >;
-};
-
-function getFrameCount(state: string): number {
-  const a = animData.animations?.[state];
-  return a ? a.frames.length : 1;
 }
 
-function getLooping(state: string): boolean {
-  const a = animData.animations?.[state];
+const defaultAnimData = defaultAnimDataRaw as unknown as BotAnimData;
+
+/** Whether a clip loops in the given dataset; unknown states default to true. */
+function getLooping(data: BotAnimData, state: string): boolean {
+  const a = data.animations?.[state];
   return a ? a.loop : true;
+}
+
+/** Frame count for a clip in the given dataset; unknown states draw one frame. */
+function getFrameCount(data: BotAnimData, state: string): number {
+  const a = data.animations?.[state];
+  return a ? a.frames.length : 1;
 }
 
 const FRAME_DURATIONS: Record<string, number> = {
@@ -41,6 +73,57 @@ const FRAME_DURATIONS: Record<string, number> = {
   jump: 30,
   attack: 40,
   swallow: 60,
+  // Two clips the intent resolver can land on for a mage character, which is
+  // the whole point of CLIP_FALLBACK: an intent is a *request*, and the dataset
+  // decides what actually plays. They need frame durations too, otherwise they
+  // silently fall back to the 100 ms catch-all in setAnimState().
+  dance: 40,
+  lie: 60,
+};
+
+// ---- Presentation intents ----
+
+/**
+ * What the AI wants the character to *look* like, independent of what the
+ * dataset can actually draw.
+ *
+ * Before this existed the code wrote clip names as string literals at 28 call
+ * sites, so a character type that does not ship a clip silently fell back to
+ * idle at the renderer. Every mage skin is in that position: no run, no jump,
+ * no attack, no swallow. The result was a mage bot that chased an enemy while
+ * visibly standing still. Naming the intent and resolving it against the
+ * dataset once, at the point of use, makes that fallback explicit and testable.
+ */
+export type BotIntent =
+  | "idle"
+  | "walk"
+  | "run"
+  | "jump"
+  | "attack"
+  | "swallow"
+  | "stun"
+  | "celebrate";
+
+/**
+ * Intent → ordered candidate clips; the first one that exists in the current
+ * dataset wins. "idle" is the terminal fallback because every dataset has it.
+ *
+ * For a Kirby bot this is the identity map, so existing behaviour is unchanged.
+ * For a mage bot it degrades: run→walk, jump→walk, attack→dance, stun→lie. The
+ * ordering is our own design decision, not a port — the original collapses
+ * hundreds of enemy types into a handful of outcome buckets so a new type
+ * inherits a death animation for free, and this is the same shape applied to
+ * clips.
+ */
+const CLIP_FALLBACK: Record<BotIntent, readonly string[]> = {
+  idle: ["idle"],
+  walk: ["walk"],
+  run: ["run", "walk"],
+  jump: ["jump", "walk"],
+  attack: ["attack", "dance", "walk"],
+  swallow: ["swallow", "walk", "idle"],
+  stun: ["lie", "crouch", "idle"],
+  celebrate: ["dance", "idle"],
 };
 
 // ---- Pathfinding constants ----
@@ -103,6 +186,37 @@ export interface AIBotConfig {
   gravity: number;
   playerFollowRange: number;
   playerStayRange: number;
+
+  /**
+   * Roaming / patrol behaviour. Off by default: with no leader a bot must
+   * still stand perfectly still, because that is the guarantee the host and
+   * the existing tests rely on ("nobody to follow ⇒ nobody moves").
+   */
+  roam: boolean;
+
+  /**
+   * Activity radius around the bot's home point, in px. Outside it the patrol
+   * script is vetoed and the bot walks itself back — see `runPatrol` (2).
+   */
+  roamRange: number;
+
+  /** How long a patrolling bot walks one way before turning, in ms. */
+  roamTurnMs: number;
+
+  /** What to do on finding no floor ahead: walk back, or stop at the lip. */
+  ledgePolicy: "turn" | "brake";
+
+  /** Seed for this bot's private random stream. Same seed ⇒ same behaviour. */
+  worldSeed: number;
+
+  /**
+   * Scripted patrol.
+   *
+   * - omitted / `undefined` → one is drawn from `PATROL_CLIPS` at construction
+   * - `null`              → no script; run the plain walk / pause / turn loop
+   * - a `MotionClip`      → use exactly this one
+   */
+  patrolClip?: MotionClip | null;
 }
 
 export interface EnemyRef {
@@ -115,6 +229,12 @@ export interface EnemyRef {
   centreY: number;
   /** Bot id that has claimed this enemy; other bots skip it. */
   lockedBy?: number;
+  /**
+   * Optional damage sink. Real `Enemy` instances have it; duck-typed literals
+   * (test fixtures, host stubs) do not, which is why the bot keeps a fallback
+   * path instead of assuming the method exists.
+   */
+  takeDamage?(amount: number, kind?: DamageKind): boolean;
 }
 
 /**
@@ -183,7 +303,6 @@ export class AIBot {
   // Countdown timers (ms remaining)
   swallowTimer: number;
   recoverTimer: number;
-  patrolDir: 1 | -1;
   patrolTimer: number;
   jumpCooldown: number;
 
@@ -197,29 +316,68 @@ export class AIBot {
   dead: boolean = false;
 
   /**
-   * Set by the host while the player is driving the character by hand. The bot
-   * drops its own script and stands down: no chasing, no following, no
-   * attacking. Only the AI script is suspended - gravity, boundary wrap and
-   * the soft character collisions still apply, so a stand-down bot that gets
-   * shoved still shuffles and faces the way it goes instead of sliding frozen.
-   */
-  aiSuspended: boolean = false;
-
-  /**
    * Set by the host while the player is driving this particular bot by hand
-   * (manual takeover). Takes precedence over aiSuspended: the bot's own script
+   * (manual takeover). Takes precedence over `aiStopped`: the bot's own script
    * is skipped and `manualDriveDir` moves it instead. Gravity, boundary wrap
    * and the soft character collisions all keep applying, so a driven bot that
    * gets shoved still faces the way it actually goes.
    */
   manualDriven: boolean = false;
 
+  /**
+   * Set by the host when the player pauses AI from the 角色生成 panel. The bot
+   * keeps existing and keeps simulating — gravity, boundary wrap and the soft
+   * collisions all still run — but acts out no script at all: it stands at idle
+   * instead of chasing, following or attacking.
+   */
+  aiStopped: boolean = false;
+
   /** Direction the player is holding for this bot while `manualDriven`. */
   manualDriveDir: number = 0;
+
+  /**
+   * One-shot jump request from the keyboard, set by the store when the player
+   * presses the jump key while this bot is being driven. Consumed (and reset)
+   * in the next on-ground tick of the `manualDriven` branch.
+   */
+  manualJump: boolean = false;
+
+  /**
+   * Stable horizontal offset (in canvas px) assigned at construction time. The
+   * follow-player branch targets `leader.x + slotOffset` for this bot, so each
+   * bot has its own "should-be position" relative to the leader instead of all
+   * bots piling onto the player's exact x. Assigned once at spawn — a bot keeps
+   * its slot even if other bots are added or removed afterwards.
+   */
+  slotOffset: number = 0;
+
+  /**
+   * Which character this bot was generated as. Decides its animation dataset,
+   * its sprite sheet and the states it can actually play — a mage bot is drawn
+   * from a mage sheet and only the five states those sheets ship.
+   */
+  characterType: string = "kirby";
+
+  /** Mage skin variant, only meaningful when `characterType === "mage"`. */
+  mageSkin: string = "mage";
+
+  /**
+   * Animation dataset for this bot's character type, injected at construction
+   * so AIBot does not need to import every character's JSON itself.
+   */
+  animData: BotAnimData = defaultAnimData;
 
   // Private timers
   private idleTimer = 0;
   private attackTimer = 0;
+
+  /**
+   * Damage of a single successful bite. Static because it is a property of the
+   * bot's attack rather than of an instance — and because it has to stay
+   * coupled to the clamp inside `Enemy.takeDamage`: at 1, the resistance
+   * column would be arithmetically dead (see BOT_INHALE_DAMAGE).
+   */
+  private static readonly INHALE_DAMAGE = BOT_INHALE_DAMAGE;
 
   /**
    * X at the start of the current tick, so the bot can be faced along the
@@ -253,6 +411,60 @@ export class AIBot {
   /** True while the bot is in an AI-initiated jump arc (drifting over walls). */
   private jumpArc = false;
 
+  // ---- Roaming / patrol state ----
+
+  /**
+   * X this bot treats as "home", anchored on its position the first time it
+   * ticks. Deliberately not captured in the constructor: the host (and the
+   * tests) place the bot *after* construction, so a value taken there would be
+   * 0 and the bot would immediately read as out of range.
+   */
+  private homeX: number | null = null;
+
+  /**
+   * Cursor into the active patrol script: which segment, and how many ms of it
+   * are left. Both are cleared together by `turnAround()` so a forced turn
+   * cannot resume a segment that is already half over.
+   */
+  private clipIdx = 0;
+  private clipLeft = 0;
+
+  /**
+   * Name of the patrol script this bot last ran. Its weight is zeroed the next
+   * time a script is drawn, so a revived bot does not replay the identical
+   * routine (the original's boss brains zero the previous action's weight and
+   * let the rest renormalise).
+   */
+  private lastAction: string | null = null;
+
+  /**
+   * Remaining ms of target memory. Decremented exactly once per tick, in
+   * update(); the chase decision only ever reads it.
+   */
+  private lastSeenTimer = 0;
+
+  /** Remaining ms before this bot may land another damaging bite. */
+  private hitCooldown = 0;
+
+  /**
+   * Private random stream for this bot only. Deriving one per agent from
+   * `(worldSeed, id)` instead of sharing a single global word is a deliberate
+   * departure from the original, where one `gRngVal` word feeds every enemy in
+   * the room: sharing it makes one bot's behaviour depend on how many other
+   * bots exist, and makes a single bot impossible to reproduce in isolation.
+   */
+  private rng: () => number;
+
+  /**
+   * Behaviour override, in the spirit of the original's `unk78` override: a
+   * reaction replaces the current decision rather than being pushed on a stack,
+   * and expiry drops straight back into normal thinking. Nothing in the project
+   * can damage a bot yet, so `requestOverride()` has no internal caller — the
+   * hook exists so a damage source does not have to redesign the state machine
+   * when it arrives.
+   */
+  private override: { until: number; intent: BotIntent } | null = null;
+
   // ---- Pathfinding state ----
   /** Current path waypoints in canvas coordinates. */
   private pathWaypoints: { x: number; y: number }[] | null = null;
@@ -278,12 +490,24 @@ export class AIBot {
     this.vy = this.config.jumpImpulse * 1.5;
     this.onGround = false;
     this.jumpArc = true;
-    this.setAnimState("jump");
+    this.setIntent("jump");
     this.dodgeJumpCooldown = 500;
     this.blockedTimer = 0;
   }
 
-  constructor(config: Partial<AIBotConfig> = {}) {
+  constructor(
+    config: Partial<AIBotConfig> = {},
+    appearance?: {
+      characterType?: string;
+      mageSkin?: string;
+      animData?: BotAnimData;
+      slotOffset?: number;
+    },
+  ) {
+    this.characterType = appearance?.characterType ?? "kirby";
+    this.mageSkin = appearance?.mageSkin ?? "mage";
+    this.animData = appearance?.animData ?? defaultAnimData;
+    this.slotOffset = appearance?.slotOffset ?? 0;
     this.config = {
       name: "Bot",
       speed: 2.5,
@@ -293,10 +517,25 @@ export class AIBot {
       gravity: 0.4,
       playerFollowRange: 340,
       playerStayRange: 120,
+      roam: false,
+      roamRange: BOT_ROAM_RANGE_PX,
+      roamTurnMs: BOT_ROAM_TURN_MS,
+      ledgePolicy: "turn",
+      worldSeed: BOT_WORLD_SEED,
+      // No default on purpose: leaving `patrolClip` absent is what asks the
+      // constructor to draw one, which in turn needs `id` to have been assigned.
       ...config,
     };
     this.name = this.config.name;
     this.id = nextBotId++;
+    this.rng = makeRng(hashSeed(this.config.worldSeed, this.id));
+    // The patrol script is drawn once, here, and then fixed for the bot's
+    // lifetime. The original binds a movement script to the enemy template
+    // rather than re-rolling it per frame; re-rolling would also make the same
+    // seed play back differently on every visit to the state.
+    if (this.config.patrolClip === undefined) {
+      this.config.patrolClip = this.drawPatrolClip();
+    }
     this.x = 0;
     this.y = 0;
     this.vx = 0;
@@ -305,6 +544,9 @@ export class AIBot {
     this.h = 26;
     this.dir = 1;
     this.state = BotState.IDLE;
+    // Field initialisation, not a clip switch. `setIntent` early-outs when the
+    // resolved clip is unchanged, so routing the constructor through it would
+    // silently skip the frame-duration lookup below.
     this.animState = "idle";
     this.animFrameIndex = 0;
     this.animTime = 0;
@@ -313,8 +555,12 @@ export class AIBot {
     this.targetEnemy = null;
     this.swallowTimer = 0;
     this.recoverTimer = 0;
-    this.patrolDir = 1;
-    this.patrolTimer = 2000 + Math.random() * 1000;
+    // Staggered first leg: 5/8 to 15/16 of a full turn, so a group spawned in
+    // one frame does not reverse in lockstep. Derived from the *configured*
+    // turn time, so changing `roamTurnMs` actually changes the cadence.
+    this.patrolTimer = Math.round(
+      this.config.roamTurnMs * (0.625 + 0.3125 * this.rng()),
+    );
     this.jumpCooldown = 0;
   }
 
@@ -376,20 +622,25 @@ export class AIBot {
    * @param groundY    Canvas Y of the ground surface
    * @param blocks     Solid blocks (ground bricks + spawned blocks)
    * @param enemies    Enemy entities in the world
-   * @param playerX    X position of the player in canvas coords
-   * @param playerY    Y position of the player in canvas coords
+   * @param playerX    X position of the player in canvas coords (null = none)
+   * @param playerY    Y position of the player in canvas coords (null = none)
    */
   update(
     deltaTime: number,
     groundY: number,
     blocks: BlockRef[],
     enemies: EnemyRef[],
-    playerX: number,
-    playerY: number,
+    playerX: number | null,
+    playerY: number | null,
   ): void {
     if (this.dead) return;
     const tickStartX = this.x;
     this.tickStartX = tickStartX;
+
+    // Anchor "home" on the first tick rather than in the constructor: the host
+    // (and the tests) place the bot after construction, so the spawn point is
+    // only known here. Until it is set, roaming is inert.
+    if (this.homeX === null) this.homeX = this.x;
 
     // Decrement countdown timers
     if (this.swallowTimer > 0) this.swallowTimer -= deltaTime;
@@ -397,6 +648,11 @@ export class AIBot {
     if (this.jumpCooldown > 0) this.jumpCooldown -= deltaTime;
     if (this.patrolTimer > 0) this.patrolTimer -= deltaTime;
     if (this.dodgeJumpCooldown > 0) this.dodgeJumpCooldown -= deltaTime;
+    if (this.hitCooldown > 0) this.hitCooldown -= deltaTime;
+    // Target memory. Decremented here and nowhere else — the chase decision
+    // reads it without writing it, so the window lasts exactly lastSeenMs
+    // instead of half of that.
+    if (this.lastSeenTimer > 0) this.lastSeenTimer -= deltaTime;
 
     // State machine: decide what to do and set animState / vx
     this.runStateMachine(deltaTime, enemies, playerX, playerY, blocks, groundY);
@@ -503,8 +759,17 @@ export class AIBot {
       this.state === BotState.CHASE ||
       this.state === BotState.PATROL ||
       (this.state === BotState.IDLE && this.animState !== "idle");
+    // A patroller standing still on purpose (a zero-velocity clip segment) is
+    // not "blocked": without this it would quietly accumulate blockedTimer and
+    // eventually be told to hop over an obstacle that was never there.
+    const intendsMotion = this.state !== BotState.PATROL || this.vx !== 0;
 
-    if (Math.abs(tickDelta) < 0.5 && this.onGround && wantsToMove) {
+    if (
+      Math.abs(tickDelta) < 0.5 &&
+      this.onGround &&
+      wantsToMove &&
+      intendsMotion
+    ) {
       this.blockedTimer += deltaTime;
     } else {
       this.blockedTimer = 0;
@@ -516,8 +781,13 @@ export class AIBot {
     const margin = 40;
     if (this.x > this.canvasWidth + margin) {
       this.x = -margin;
+      // A wrap is a teleport, so "home" has to travel with it. Otherwise a
+      // patrolling bot lands on the far edge, reads as instantly out of range,
+      // and trudges all the way back across the canvas.
+      this.homeX = this.x;
     } else if (this.x < -margin) {
       this.x = this.canvasWidth + margin;
+      this.homeX = this.x;
     }
 
     // ---- Advance animation frame ----
@@ -586,9 +856,30 @@ export class AIBot {
   }
 
   /**
+   * Land one contact hit on an enemy and report whether that finished it.
+   *
+   * `takeDamage` is optional on purpose: the test fixtures are duck-typed
+   * object literals with no damage method at all. Falling back to the old
+   * "mark it dead outright" keeps those working, instead of turning a missing
+   * method into a silently swallowed hit.
+   */
+  private applyHit(e: EnemyRef, dmg: number): boolean {
+    if (typeof e.takeDamage === "function") return e.takeDamage(dmg);
+    e.dead = true;
+    return true;
+  }
+
+  /**
    * During ATTACK state, check if any enemy is within attackRange and in front
-   * of the bot. If caught, marks the enemy as dead and returns it.
-   * Returns null if no enemy was caught.
+   * of the bot. If caught, resolve one damage tick against it and return it
+   * **only if that tick killed it**. An enemy that survives keeps the attack
+   * state alive (stunned, health bar ticking down) and is hit again once the
+   * re-hit gap has passed.
+   *
+   * The gap matters: the attack state re-tests every tick, so without it a
+   * 5 hp enemy would lose all five points in three frames (48 ms) and the
+   * entire point of the damage model — a visible hit reaction — would never
+   * appear.
    */
   tryCatchEnemy(enemies: EnemyRef[]): EnemyRef | null {
     const range = this.config.attackRange;
@@ -603,18 +894,32 @@ export class AIBot {
 
       // Within horizontal range, in front, and roughly at same height
       if (dist <= range && inFront && dy <= this.h * 2) {
-        e.dead = true;
-        return e;
+        if (this.hitCooldown > 0) return null;
+        this.hitCooldown = BOT_INHALE_REHIT_MS;
+        if (this.applyHit(e, AIBot.INHALE_DAMAGE)) return e;
+        return null;
       }
     }
 
     return null;
   }
 
+  /**
+   * Ask for an external behaviour override — the slot a hit reaction would
+   * occupy. The original game overrides the behaviour callback outright on a
+   * hit (no save/restore stack: the enemy just re-enters its normal decision
+   * point when the reaction ends); this is the same rule at a single level.
+   * There is no caller yet because nothing in the project can damage a bot,
+   * which is why it is a public hook rather than an internal branch.
+   */
+  requestOverride(intent: BotIntent, ms: number): void {
+    this.override = { until: ms, intent };
+  }
+
   /** Reset the bot to IDLE state, clearing all timers and targets. */
   reset(): void {
     this.state = BotState.IDLE;
-    this.setAnimState("idle");
+    this.setIntent("idle");
     this.vx = 0;
     this.vy = 0;
     this.targetEnemy = null;
@@ -630,6 +935,20 @@ export class AIBot {
     this.pathIdx = 0;
     this.pathFrame = 0;
     this.pathTargetKey = "";
+    this.lastSeenTimer = 0;
+    this.hitCooldown = 0;
+    this.override = null;
+    this.clipIdx = 0;
+    this.clipLeft = 0;
+    // A reset is a fresh start, so the patrol script is drawn again — with the
+    // previous script's weight zeroed, which is what stops a revived bot from
+    // replaying the identical routine. A bot that opted out of scripts (an
+    // explicit `null`) stays that way.
+    if (this.config.patrolClip !== null) {
+      this.lastAction = null;
+      this.config.patrolClip = this.drawPatrolClip();
+    }
+    this.homeX = this.x;
   }
 
   /**
@@ -713,7 +1032,23 @@ export class AIBot {
       if (shortfall <= 0) continue;
 
       const away = dx >= 0 ? 1 : -1;
-      const push = Math.min(shortfall * BOT_COLLIDE_SOFTNESS, BOT_COLLIDE_MAX_RESOLVE);
+      const push = Math.min(
+        shortfall * BOT_COLLIDE_SOFTNESS,
+        BOT_COLLIDE_MAX_RESOLVE,
+      );
+      // When this bot is mid-walk toward a slot (vx was set by runStateMachine
+      // this tick in the follow branch) the soft-push fights the walk when
+      // the bot is crossing past another bot whose slot is on the opposite
+      // side of the leader. The natural shove direction is away from `other`,
+      // but `away` here can point opposite to where this bot actually wants
+      // to go — and pushing it that way traps the whole cluster around the
+      // leader, because every tick the walk step (2.5 px) is dwarfed by the
+      // push step (up to 10 px) in the wrong direction. Skip the push when
+      // it would move against the bot's current walk intent; the two bots
+      // cross paths and the walk continues. vx=0 bots (idle) skip the check
+      // so the soft-push still nudges them when settled bots get shoved by
+      // a third body.
+      if (this.vx !== 0 && away !== Math.sign(this.vx)) continue;
       this.x += away * push;
       shovedX += away * push;
     }
@@ -730,10 +1065,7 @@ export class AIBot {
       this.onGround &&
       this.animState === "idle"
     ) {
-      this.animState = "walk";
-      this.animFrameIndex = 0;
-      this.animTime = 0;
-      this.frameDurationMs = FRAME_DURATIONS.walk ?? 50;
+      this.setIntent("walk");
       this.pushWalkTimer = 250;
     }
 
@@ -750,18 +1082,253 @@ export class AIBot {
     //    direction; the bot should face where it's trying to go, not where it
     //   's being bumped.
     if (this.blockedByBlock) return;
-    // Use `dir` (always set by the AI in runStateMachine) as the intended
-    // direction — it's always 1 or -1, representing where the bot wants to face.
-    if (
-      Math.sign(shovedX) !== this.dir &&
-      Math.abs(shovedX) > 0.5
-    ) {
+    // `dir` is the AI's intended facing. It is always 1 or -1; it is *not*
+    // necessarily reassigned every tick — the follow branch deliberately keeps
+    // the current facing when the bot has settled into its slot.
+    if (Math.sign(shovedX) !== this.dir && Math.abs(shovedX) > 0.5) {
       return;
     }
     this.syncFacing(this.x - (this.tickStartX ?? entryX));
   }
 
   // ---- Private methods ----
+
+  /**
+   * Map a presentation intent onto a clip that actually exists in this bot's
+   * dataset. This is the single place where "what the AI wants" meets "what
+   * the art has".
+   */
+  private resolveClip(intent: BotIntent): string {
+    const candidates = CLIP_FALLBACK[intent];
+    for (let i = 0; i < candidates.length; i++) {
+      if (this.animData.animations?.[candidates[i]]) return candidates[i];
+    }
+    return "idle";
+  }
+
+  /**
+   * Request a presentation and let the dataset pick the concrete clip.
+   *
+   * The ordering inside `setAnimState` matters: the intent is resolved *first*
+   * and the resulting clip is what gets compared for the "already there" early
+   * out. Comparing intents instead would never early-out (two different
+   * intents can resolve to one clip) and would restart the animation every
+   * tick of a state that had not actually changed.
+   */
+  private setIntent(intent: BotIntent): void {
+    this.setAnimState(this.resolveClip(intent));
+  }
+
+  /**
+   * Draw this bot's patrol script from `PATROL_CLIPS`, with the script it ran
+   * last time excluded (the anti-repetition rule: zero the previous bucket,
+   * let the rest renormalise, which the subtractive picker gives for free).
+   */
+  private drawPatrolClip(): MotionClip | null {
+    const weights = PATROL_CLIP_WEIGHTS.map((w, i) =>
+      PATROL_CLIPS[i] && PATROL_CLIPS[i].name === this.lastAction ? 0 : w,
+    );
+    const pick = pickWeighted(this.rng, weights);
+    // -1 means every weight was zero (a one-entry table that just got
+    // suppressed). Keeping the current script is the safe reading of "no
+    // alternative"; re-rolling forever would be a livelock.
+    if (pick < 0 || !PATROL_CLIPS[pick]) return this.config.patrolClip ?? null;
+    this.lastAction = PATROL_CLIPS[pick].name;
+    return PATROL_CLIPS[pick];
+  }
+
+  /**
+   * Is there still floor under the bot one short step ahead?
+   *
+   * Pure geometry — no state, no allocation, no time term — so it cannot
+   * introduce frame-rate dependence. Two rules, in this order:
+   *
+   * 1. The ground plane is infinite in x, so a bot standing on it always has
+   *    ground ahead. This must be checked first, for two reasons: the world
+   *    wraps at the canvas edges (a wrap teleports the bot across, and a
+   *    blocks-only test would read that as a cliff), and the normal scene runs
+   *    the follow branch with no blocks in range at all.
+   * 2. Otherwise look for a live block whose *top* is within stepping range:
+   *    not more than a hair above the feet (that is a wall to jump, not a
+   *    step) and not more than one step down (that is a fall, not a walk).
+   */
+  private isGroundAhead(
+    blocks: BlockRef[],
+    groundY: number,
+    dir: 1 | -1,
+  ): boolean {
+    const probeX = this.x + dir * BOT_LEDGE_LOOKAHEAD_PX;
+    const footY = this.y; // AIBot's y is its foot line
+
+    // Rule 1 — ground plane.
+    if (groundY - footY <= BOT_LEDGE_GROUND_BAND_PX) return true;
+
+    // Rule 2 — a block top within stepping range under the probe window.
+    for (const b of blocks) {
+      if (b.dead) continue;
+      if (b.y >= groundY - 1) continue; // ground bricks are covered by rule 1
+      if (probeX + BOT_LEDGE_PROBE_HALF_PX < b.x) continue;
+      if (probeX - BOT_LEDGE_PROBE_HALF_PX > b.x + b.w) continue;
+      if (b.y < footY - BOT_LEDGE_GROUND_BAND_PX) continue; // too high to step onto
+      if (b.y > footY + BOT_LEDGE_STEP_DOWN_PX) continue; // too far down to climb back
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Flip the patrol direction and re-arm the turn timer.
+   *
+   * The three writes happen together on purpose — the original does the same
+   * (`flags ^= 1; xspeed = -xspeed; counter = 0;`). The script is restarted
+   * for the same reason: resuming a segment halfway through after a forced
+   * turn reads as the bot stuttering.
+   */
+  private turnAround(): void {
+    this.dir = -this.dir as 1 | -1;
+    this.patrolTimer = this.config.roamTurnMs;
+    this.clipIdx = 0;
+    this.clipLeft = 0;
+  }
+
+  /**
+   * Advance the scripted patrol by one tick.
+   *
+   * Writes horizontal intent and presentation only — never x, y or vy. Vertical
+   * motion belongs to the physics step, which is exactly why the original's
+   * script fields for y-speed and per-axis acceleration were dropped instead of
+   * ported.
+   *
+   * Durations are approximate: at most one segment boundary is crossed per
+   * tick, so at low frame rates a clip runs slightly long rather than
+   * catching up in a burst.
+   */
+  private motionStep(clip: MotionClip, deltaTime: number): void {
+    if (clip.segs.length === 0) return;
+    const seg = clip.segs[this.clipIdx];
+    if (!seg) return;
+
+    if (this.clipLeft <= 0) {
+      // Entering a segment: honour its turn request, latch its duration and
+      // publish its presentation (an intent-less segment keeps the previous).
+      if (this.clipIdx > 0 && seg.turn) this.dir = -this.dir as 1 | -1;
+      this.clipLeft = seg.ms;
+      if (seg.intent) this.setIntent(seg.intent);
+      this.vx = seg.vx * this.config.speed;
+      if (this.clipLeft <= 0) {
+        // Zero-length segment: step over it rather than spin on it forever.
+        this.advanceClip(clip);
+        return;
+      }
+    }
+
+    // A non-zero segment velocity always re-derives the facing. A sprite
+    // walking backwards is a much louder bug than a redundant `turn` flag.
+    if (seg.vx !== 0) this.dir = seg.vx > 0 ? 1 : -1;
+
+    this.clipLeft -= deltaTime;
+    if (this.clipLeft <= 0) this.advanceClip(clip);
+  }
+
+  private advanceClip(clip: MotionClip): void {
+    this.clipIdx =
+      this.clipIdx + 1 < clip.segs.length
+        ? this.clipIdx + 1
+        : clip.loop
+          ? 0
+          : clip.segs.length - 1;
+    this.clipLeft = 0;
+  }
+
+  /**
+   * Patrol for one tick.
+   *
+   * The priority chain below is the whole design and must not be reshuffled:
+   *
+   *     wall / ledge veto  >  home radius veto  >  script velocity
+   *                       >  timed turn  >  script `turn`
+   *
+   * The vetoes come first because they are the only rules that can be *wrong*:
+   * a scripted segment that walks a bot off a platform, or across the whole
+   * canvas, is unrecoverable, while an extra turn is only a differently-shaped
+   * loop.
+   */
+  private runPatrol(
+    blocks: BlockRef[],
+    groundY: number,
+    deltaTime: number,
+  ): void {
+    this.state = BotState.PATROL;
+
+    // ---- (1) veto layer: wall or ledge ----
+    if (
+      this.blockedByBlock ||
+      (this.onGround && !this.isGroundAhead(blocks, groundY, this.dir))
+    ) {
+      // A wall is always turned away from. A ledge depends on policy: "brake"
+      // stops dead on the lip for this tick, "turn" walks back the way it came.
+      if (this.config.ledgePolicy === "brake" && !this.blockedByBlock) {
+        this.vx = 0;
+        this.dir = -this.dir as 1 | -1;
+        this.patrolTimer = this.config.roamTurnMs;
+        this.clipIdx = 0;
+        this.clipLeft = 0;
+      } else {
+        this.turnAround();
+      }
+      // The veto also invalidates the running segment — the script was about to
+      // keep walking, which is exactly what must stop happening.
+      this.setIntent(this.onGround ? "walk" : "jump");
+      this.vx = this.onGround ? this.dir * this.config.speed : 0;
+      return;
+    }
+
+    // ---- (2) home range: a veto, for the same reason the wall/ledge one is ----
+    //
+    // The original bounds an enemy's wander with room walls. We have no rooms,
+    // so a radius around the spawn point is the equivalent — and it has to have
+    // veto power, not merely set a facing.
+    //
+    // `motionStep` re-derives BOTH `dir` and `vx` from the segment's signed
+    // velocity on every tick it runs (:1215 / :1225). A rule that only sets
+    // `dir` beforehand is therefore overwritten on every non-zero-velocity
+    // frame, and since all three PATROL_CLIPS have a positive net displacement
+    // per cycle, a facing hint can never win — the bot walks away for good.
+    // Measured before this fix (roamRange 240, dt 16 ms): `fidget` drifted
+    // 608 px and never came back, `scurry` 2112 px.
+    //
+    // So while the bot is outside the radius the script does not drive the legs
+    // at all — the same one-tick-early-return shape the wall/ledge veto uses.
+    const homeX = this.homeX ?? this.x;
+    if (this.onGround && Math.abs(homeX - this.x) > this.config.roamRange) {
+      // Turn only when the bot is facing away from home. Flipping an
+      // already-correct facing would send it outward, and flipping every tick
+      // would make it turn on the spot instead of walking back.
+      const headingHome = Math.sign(this.dir) === Math.sign(homeX - this.x);
+      if (!headingHome) this.turnAround();
+      this.vx = this.dir * this.config.speed;
+      this.setIntent(this.onGround ? "walk" : "jump");
+      return;
+    }
+    // In range (or airborne, where the physics step owns vx anyway): hand the
+    // legs back to the script below.
+
+    // ---- (3) who drives the legs ----
+    if (this.config.patrolClip) {
+      this.motionStep(this.config.patrolClip, deltaTime);
+    } else {
+      if (this.patrolTimer <= 0) this.turnAround();
+      this.vx = this.dir * this.config.speed;
+      // Patrol is a stroll, not a sprint: `run` stays reserved for chasing.
+      this.setIntent("walk");
+    }
+
+    // Airborne patrol has no horizontal authority — the physics step owns it.
+    if (!this.onGround) {
+      this.vx = 0;
+      this.setIntent("jump");
+    }
+  }
 
   /** Check AABB overlap between the bot and a block. */
   private overlapsBlock(block: BlockRef): boolean {
@@ -815,10 +1382,16 @@ export class AIBot {
     // against a block edge, or is shoved by a character against the AI's
     // intent.  The AI's target-facing direction wins; the bot should face
     // where it's trying to go, not where it's being bumped.
+    //
+    // PATROL joins the list for the same reason: the patrol rules own `dir` for
+    // a whole tick (wall, ledge, home range, timed turn, script segment), and
+    // syncing against displacement would flip it every frame against whatever
+    // it is walking into.
     if (
       this.state === BotState.ATTACK ||
       this.state === BotState.SWALLOW ||
-      this.state === BotState.CHASE
+      this.state === BotState.CHASE ||
+      this.state === BotState.PATROL
     ) {
       return;
     }
@@ -841,8 +1414,8 @@ export class AIBot {
   private updateAnimationFrame(deltaTime: number): void {
     this.animTime += deltaTime;
 
-    const fc = getFrameCount(this.animState);
-    const looping = getLooping(this.animState);
+    const fc = getFrameCount(this.animData, this.animState);
+    const looping = getLooping(this.animData, this.animState);
 
     while (this.animTime >= this.frameDurationMs) {
       this.animTime -= this.frameDurationMs;
@@ -865,34 +1438,98 @@ export class AIBot {
   private runStateMachine(
     deltaTime: number,
     enemies: EnemyRef[],
-    playerX: number,
-    playerY: number,
+    playerX: number | null,
+    playerY: number | null,
     blocks: BlockRef[],
     groundY: number,
   ): void {
     // Manual takeover: the player drives this bot directly. Takes precedence
-    // over aiSuspended (the host may have stood the whole floor down because a
-    // direction key is held, but this bot is the one being driven). A held
-    // direction walks it that way; no key leaves it standing down at idle.
-    // Gravity, boundary wrap and the soft character collisions still run.
+    // over any other AI state. A held direction walks it that way; no key
+    // leaves it standing down at idle. Gravity, boundary wrap and the soft
+    // character collisions still run.
     if (this.manualDriven) {
       this.targetEnemy = null;
+      // Jump request from the keyboard: take off when grounded. Consumed
+      // here so a press becomes exactly one jump; re-pressing after landing
+      // has to re-arm the flag. jumpCooldown guards against repeated
+      // triggers from a held key.
+      if (this.manualJump && this.onGround && this.jumpCooldown <= 0) {
+        this.vy = this.config.jumpImpulse;
+        this.onGround = false;
+        this.jumpArc = true;
+        this.jumpCooldown = 500;
+        this.manualJump = false;
+        this.setIntent("jump");
+        return;
+      }
+      // A held direction walks it; no key leaves it standing down at idle.
       if (this.manualDriveDir !== 0) {
         this.vx = this.manualDriveDir * this.config.speed;
         this.dir = this.manualDriveDir > 0 ? 1 : -1;
-        this.setAnimState("walk");
+        this.setIntent("walk");
       } else {
         this.vx = 0;
-        this.setAnimState("idle");
+        this.setIntent("idle");
       }
+      return;
+    }
+
+    // AI paused from the panel: the character stays on the field but acts out
+    // no script. Checked after manualDriven so a hand-driven bot keeps moving.
+    if (this.aiStopped) {
+      this.targetEnemy = null;
+      this.state = BotState.IDLE;
+      this.vx = 0;
+      this.setIntent("idle");
+      return;
+    }
+
+    // External behaviour override (hit reaction, and anything else that must
+    // take the body over for a while). Placed *before* the no-leader gate so an
+    // overridden bot plays its reaction even when there is nobody to follow —
+    // otherwise the most dramatic moment would be skipped exactly when there is
+    // no crowd watching.
+    //
+    // Precondition: something has to call `requestOverride()`. Nothing inside
+    // the engine does yet (no source of damage exists), which is why this is a
+    // public hook rather than an internal branch — see the method's own note.
+    if (this.override) {
+      this.override.until -= deltaTime;
+      this.targetEnemy = null;
+      this.vx = 0;
+      this.setIntent(this.override.intent);
+      if (this.override.until <= 0) this.override = null;
+      return;
+    }
+
+    // No leader: nobody to follow, nothing to chase towards. Stand completely
+    // still — including the push-shuffle animation below — so a cluster of bots
+    // at idle looks like a cluster of bots at idle instead of a heap of
+    // walking-in-place animations. Checked before pushWalkTimer so a soft push
+    // never paints a walk cycle on top of "no target".
+    //
+    // `roam` is the single exception: a bot explicitly told to patrol is
+    // *supposed* to go somewhere when there is nobody to follow. The flag
+    // defaults to false, so every bot that has not opted in still stops dead
+    // here — which is what the "no leader ⇒ no movement" guarantee rests on.
+    if (playerX === null && playerY === null && !this.config.roam) {
+      this.targetEnemy = null;
+      this.state = BotState.IDLE;
+      this.vx = 0;
+      this.setIntent("idle");
       return;
     }
 
     // A shoved bot latches a short walk cycle so it animates its shuffle
     // instead of being snapped back to idle every tick by the AI reset.
-    if (this.pushWalkTimer > 0 && this.onGround && this.state !== BotState.ATTACK && this.state !== BotState.SWALLOW) {
+    if (
+      this.pushWalkTimer > 0 &&
+      this.onGround &&
+      this.state !== BotState.ATTACK &&
+      this.state !== BotState.SWALLOW
+    ) {
       this.pushWalkTimer -= deltaTime;
-      this.animState = "walk";
+      this.setIntent("walk");
       this.vx = 0;
       return;
     }
@@ -902,14 +1539,51 @@ export class AIBot {
       this.state === BotState.PATROL ||
       this.state === BotState.CHASE
     ) {
-      // Enemies take priority.
+      // ---- target acquisition, then target *memory* ----
+      //
+      // Two separate decisions on purpose. Re-scanning every tick and dropping
+      // the target the instant it crossed chaseRange made bots twitch at the
+      // boundary and forget a target that had only briefly stepped out of
+      // view. So "what can I see now" (acquisition) is split from "how long do
+      // I keep chasing what I last saw" (retention, `lastSeenTimer`).
+      //
+      // The original game has no such fallback — every chaser special-cases
+      // "lost the target" — so this is an addition rather than a port.
       const nearest = this.findNearestEnemy(enemies);
       const enemyDist = nearest
-        ? Math.hypot(nearest.centreX - this.centreX, nearest.centreY - this.centreY)
+        ? Math.hypot(
+            nearest.centreX - this.centreX,
+            nearest.centreY - this.centreY,
+          )
         : Infinity;
+      const acquired = nearest !== null && enemyDist <= this.config.chaseRange;
 
-      if (nearest && enemyDist <= this.config.chaseRange) {
-        this.targetEnemy = nearest;
+      // Drop a cached target that has since died *before* deciding, not after:
+      // the host splices dead enemies out only after update() returns and then
+      // writes `lockedBy` on whatever target this bot reports, so holding a
+      // corpse would pin a lock on an object about to disappear.
+      if (this.targetEnemy !== null && this.targetEnemy.dead) {
+        this.targetEnemy = null;
+        this.lastSeenTimer = 0;
+      }
+
+      // Retention is read-only here — update() already decremented it this
+      // tick, so writing again would halve the window every frame.
+      const chasing =
+        acquired || (this.lastSeenTimer > 0 && this.targetEnemy !== null);
+      // `chasing` gates the target, it does not merely describe it: without the
+      // ternary below, a stale `targetEnemy` would keep feeding the CHASE
+      // branch after the memory window closed, and the bot would walk to the
+      // other side of the map chasing something it had already forgotten.
+      const chaseTarget = chasing
+        ? acquired
+          ? nearest
+          : this.targetEnemy
+        : null;
+
+      if (chaseTarget) {
+        if (acquired) this.lastSeenTimer = BOT_LAST_SEEN_MS;
+        this.targetEnemy = chaseTarget;
         this.state = BotState.CHASE;
 
         const targetHDist = Math.abs(this.targetEnemy.centreX - this.x);
@@ -920,7 +1594,7 @@ export class AIBot {
           this.vx = 0;
           this.attackTimer = 0;
           this.state = BotState.ATTACK;
-          this.setAnimState("attack");
+          this.setIntent("attack");
           return;
         }
 
@@ -934,7 +1608,10 @@ export class AIBot {
         this.pathFrame++;
         const tk =
           `${Math.round(this.targetEnemy.centreX)}_${Math.round(this.targetEnemy.centreY)}`;
-        if (this.pathFrame >= PATHFIND_RECOMPUTE || this.pathTargetKey !== tk) {
+        if (
+          this.pathFrame >= PATHFIND_RECOMPUTE ||
+          this.pathTargetKey !== tk
+        ) {
           this.computePath(
             blocks,
             groundY,
@@ -981,8 +1658,8 @@ export class AIBot {
           // movement direction, but facing should always be toward the target.
           // This prevents oscillation when waypoints near block edges have a
           // slightly different X than the bot's position, and also during a
-          // jump arc — the bot keeps facing its target even while following a
-          // parabolic path.
+          // jump arc — the bot keeps facing its target even while following
+          // a parabolic path.
           if (this.targetEnemy) {
             this.dir = this.targetEnemy.centreX > this.x ? 1 : -1;
           }
@@ -995,7 +1672,7 @@ export class AIBot {
           // recalculating vx every frame during a jump causes oscillation when
           // the bot overshoots the waypoint horizontally.
           if (this.jumpArc) {
-            this.setAnimState("jump");
+            this.setIntent("jump");
             return;
           }
 
@@ -1011,7 +1688,7 @@ export class AIBot {
           ) {
             this.vx = 0;
             this.pathIdx++;
-            this.setAnimState("run");
+            this.setIntent("run");
             return;
           }
 
@@ -1022,7 +1699,7 @@ export class AIBot {
           const moveDir = dx > 0 ? 1 : dx < 0 ? -1 : 0;
           this.vx = moveDir * this.config.speed * 1.5;
 
-          this.setAnimState("run");
+          this.setIntent("run");
 
           // Jump when the next waypoint is above the bot.  Trigger the jump
           // as soon as the bot is on the ground and the waypoint is elevated,
@@ -1037,40 +1714,49 @@ export class AIBot {
               this.vy = this.config.jumpImpulse;
               this.onGround = false;
               this.jumpArc = true;
-              this.setAnimState("jump");
+              this.setIntent("jump");
               this.jumpCooldown = 500;
             }
           }
           // If blocked by a block but the waypoint is NOT above, jump anyway as
           // a last-resort dodge — the bot is stuck and needs to break free.
-          else if (this.onGround && this.jumpCooldown <= 0 && this.blockedByBlock) {
+          else if (
+            this.onGround &&
+            this.jumpCooldown <= 0 &&
+            this.blockedByBlock
+          ) {
             this.vx = this.dir * this.config.speed * 1.5;
             this.vy = this.config.jumpImpulse;
             this.onGround = false;
             this.jumpArc = true;
-            this.setAnimState("jump");
+            this.setIntent("jump");
             this.jumpCooldown = 500;
           }
         } else {
           // No path — fallback to direct movement toward enemy. Only update
           // dir if we have a target; otherwise keep the current facing to
           // avoid flipping on a null target.
-          if (nearest) {
-            this.dir = nearest.centreX > this.x ? 1 : -1;
+          //
+          // `chaseTarget`, not `nearest`: while the bot is running on target
+          // memory there may be nothing in range this tick, and the facing has
+          // to stay pointed at the remembered target rather than at nothing.
+          if (chaseTarget) {
+            this.dir = chaseTarget.centreX > this.x ? 1 : -1;
           }
           this.vx = this.dir * this.config.speed * 1.5;
 
           // While airborne in a jump arc, maintain drift
           if (this.jumpArc) {
-            this.setAnimState("jump");
+            this.setIntent("jump");
             return;
           }
 
-          this.setAnimState("run");
+          this.setIntent("run");
 
           // Jump if the target is above the bot and the jump cooldown is ready.
           if (this.onGround && this.jumpCooldown <= 0) {
-            const targetTop = this.targetEnemy.centreY - this.targetEnemy.h / 2;
+            const targetTop =
+              this.targetEnemy.centreY - this.targetEnemy.h / 2;
             if (
               targetTop < this.top - 10 &&
               targetHDist < this.config.chaseRange * 0.6
@@ -1079,17 +1765,21 @@ export class AIBot {
               this.vy = this.config.jumpImpulse;
               this.onGround = false;
               this.jumpArc = true;
-              this.setAnimState("jump");
+              this.setIntent("jump");
               this.jumpCooldown = 500;
             }
           }
           // Blocked by a block with no path — jump as a dodge
-          else if (this.onGround && this.jumpCooldown <= 0 && this.blockedByBlock) {
+          else if (
+            this.onGround &&
+            this.jumpCooldown <= 0 &&
+            this.blockedByBlock
+          ) {
             this.vx = this.dir * this.config.speed * 1.5;
             this.vy = this.config.jumpImpulse;
             this.onGround = false;
             this.jumpArc = true;
-            this.setAnimState("jump");
+            this.setIntent("jump");
             this.jumpCooldown = 500;
           }
         }
@@ -1097,41 +1787,71 @@ export class AIBot {
         return;
       }
 
-      // Otherwise follow the player.
-      if (this.aiSuspended) {
+      // ---- no enemy: follow the leader, else patrol, else stand still ----
+      //
+      // Follow comes first, always. The project's normal scene always has a
+      // leader (Kirby, or a taken-over bot); if patrol outranked it, every bot
+      // would abandon its formation the moment it stopped chasing, which would
+      // tear the follower tail apart.
+      if (playerX !== null && playerY !== null) {
         this.targetEnemy = null;
         this.state = BotState.IDLE;
-        this.vx = 0;
-        this.setAnimState("idle");
+
+        // Each bot has a stable horizontal slot relative to the leader, so it
+        // targets `leader.x + slotOffset` instead of the player's exact x. This
+        // stops the cluster of identical targets that causes bots to keep
+        // turning left-right into each other near a stationary player. The
+        // settle threshold is small (vs the soft-push step) so once the bot
+        // arrives at its slot it stays idle and does not get dragged back into
+        // walking by incidental shoves.
+        const targetX = playerX + this.slotOffset;
+        const dx = targetX - this.x;
+        const distToSlot = Math.abs(dx);
+
+        if (distToSlot <= FOLLOW_SLOT_SETTLE_PX) {
+          this.vx = 0;
+          // Keep the current facing — don't flip on tiny dx wobble, that's the
+          // "kept turning left-right" symptom.
+          this.setIntent("idle");
+          return;
+        }
+
+        this.dir = dx > 0 ? 1 : dx < 0 ? -1 : this.dir;
+        // Vertical distance still contributes to the run/walk decision: a bot
+        // far above or below its slot (mid-jump or falling) should not slow
+        // down.
+        const dist = Math.hypot(dx, playerY - this.centreY);
+        if (dist > this.config.playerFollowRange) {
+          this.vx = this.dir * this.config.speed * 1.6;
+          this.setIntent("run");
+        } else {
+          this.vx = this.dir * this.config.speed;
+          this.setIntent("walk");
+        }
         return;
       }
+
+      if (this.config.roam) {
+        this.targetEnemy = null;
+        this.runPatrol(blocks, groundY, deltaTime);
+        return;
+      }
+
+      // Defence in depth: the no-leader gate above already returned for every
+      // bot that has not opted into roaming, so this is unreachable today. It
+      // stays so that reordering the gates above can never silently turn
+      // "nobody to follow" into "the bot wanders off on its own".
       this.targetEnemy = null;
       this.state = BotState.IDLE;
-      const dx = playerX - this.x;
-      const dist = Math.hypot(dx, playerY - this.centreY);
-
-      if (dist <= this.config.playerStayRange) {
-        this.vx = 0;
-        this.dir = dx >= 0 ? 1 : -1;
-        this.setAnimState("idle");
-        return;
-      }
-
-      this.dir = dx >= 0 ? 1 : -1;
-      if (dist > this.config.playerFollowRange) {
-        this.vx = this.dir * this.config.speed * 1.6;
-        this.setAnimState("run");
-      } else {
-        this.vx = this.dir * this.config.speed;
-        this.setAnimState("walk");
-      }
+      this.vx = 0;
+      this.setIntent("idle");
       return;
     }
 
     switch (this.state) {
       // ---- ATTACK ----
       case BotState.ATTACK: {
-        this.setAnimState("attack");
+        this.setIntent("attack");
         this.vx = 0;
         this.attackTimer += deltaTime;
 
@@ -1146,10 +1866,16 @@ export class AIBot {
         const caught = this.tryCatchEnemy(enemies);
         if (caught) {
           this.state = BotState.SWALLOW;
-          this.setAnimState("swallow");
+          this.setIntent("swallow");
           this.targetEnemy = null;
+          // Time the swallow by the clip that will actually play. Using the
+          // literal "swallow" here returned a frame count of 1 for a mage
+          // (which has no such clip), so the whole swallow phase flashed past
+          // in a single frame.
+          const clip = this.resolveClip("swallow");
           this.swallowTimer =
-            getFrameCount("swallow") * (FRAME_DURATIONS.swallow ?? 60);
+            getFrameCount(this.animData, clip) *
+            (FRAME_DURATIONS[clip] ?? 60);
           return;
         }
 
@@ -1157,20 +1883,20 @@ export class AIBot {
         if (this.attackTimer >= 1500) {
           this.state = BotState.IDLE;
           this.idleTimer = 0;
-          this.setAnimState("idle");
+          this.setIntent("idle");
         }
         break;
       }
 
       // ---- SWALLOW ----
       case BotState.SWALLOW: {
-        this.setAnimState("swallow");
+        this.setIntent("swallow");
         this.vx = 0;
 
         // When swallow animation finishes → RECOVER
         if (this.swallowTimer <= 0) {
           this.state = BotState.RECOVER;
-          this.setAnimState("idle");
+          this.setIntent("idle");
           this.recoverTimer = 500;
         }
         break;
@@ -1178,7 +1904,7 @@ export class AIBot {
 
       // ---- RECOVER ----
       case BotState.RECOVER: {
-        this.setAnimState("idle");
+        this.setIntent("idle");
         this.vx = 0;
 
         // After recovery → IDLE
@@ -1204,8 +1930,14 @@ export class AIBot {
     tx: number,
     ty: number,
   ): void {
-    const cols = Math.max(1, Math.ceil(this.canvasWidth / PATHFIND_CELL) + 1);
-    const rows = Math.max(1, Math.ceil(Math.max(groundY, 1) / PATHFIND_CELL) + 1);
+    const cols = Math.max(
+      1,
+      Math.ceil(this.canvasWidth / PATHFIND_CELL) + 1,
+    );
+    const rows = Math.max(
+      1,
+      Math.ceil(Math.max(groundY, 1) / PATHFIND_CELL) + 1,
+    );
     const blocked = new Uint8Array(cols * rows);
 
     // Mark cells overlapped by blocks (skip ground bricks — they are handled
@@ -1214,9 +1946,15 @@ export class AIBot {
       if (b.dead) continue;
       if (b.y >= groundY - 1) continue;
       const bx1 = Math.max(0, Math.floor(b.x / PATHFIND_CELL));
-      const bx2 = Math.min(cols - 1, Math.floor((b.x + b.w) / PATHFIND_CELL));
+      const bx2 = Math.min(
+        cols - 1,
+        Math.floor((b.x + b.w) / PATHFIND_CELL),
+      );
       const by1 = Math.max(0, Math.floor(b.y / PATHFIND_CELL));
-      const by2 = Math.min(rows - 1, Math.floor((b.y + b.h) / PATHFIND_CELL));
+      const by2 = Math.min(
+        rows - 1,
+        Math.floor((b.y + b.h) / PATHFIND_CELL),
+      );
       for (let cy = by1; cy <= by2; cy++) {
         for (let cx = bx1; cx <= bx2; cx++) {
           blocked[cy * cols + cx] = 1;
@@ -1248,8 +1986,14 @@ export class AIBot {
       ),
     );
     // Target's cell
-    let egx = Math.max(0, Math.min(cols - 1, Math.floor(tx / PATHFIND_CELL)));
-    let egy = Math.max(0, Math.min(rows - 1, Math.floor(ty / PATHFIND_CELL)));
+    let egx = Math.max(
+      0,
+      Math.min(cols - 1, Math.floor(tx / PATHFIND_CELL)),
+    );
+    let egy = Math.max(
+      0,
+      Math.min(rows - 1, Math.floor(ty / PATHFIND_CELL)),
+    );
 
     // If start is blocked, find nearest free cell
     if (blocked[sgy * cols + sgx]) {
@@ -1333,8 +2077,9 @@ export class AIBot {
 
       const curKey = cur.gy * cols + cur.gx;
 
-      // Skip stale entries: g-score has been improved since this entry was added.
-      // Use tolerance comparison because gScore is Float32Array and cur.g is Float64.
+      // Skip stale entries: g-score has been improved since this entry was
+      // added. Use a tolerance comparison because gScore is Float32Array while
+      // cur.g is Float64.
       if (Math.abs(cur.g - gScore[curKey]) > 0.001) continue;
 
       // Skip already-closed nodes (prevents redundant re-expansion)

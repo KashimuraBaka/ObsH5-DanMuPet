@@ -88,6 +88,18 @@ export const PANEL_STATES: readonly KirbyState[] = KIRBY_STATES.filter(
   (s) => s !== "coast",
 );
 
+/**
+ * States the mage sprites actually ship: the full Kirby set is not available,
+ * so the panel must offer these instead of silently falling back to `idle`.
+ */
+export const MAGE_PANEL_STATES: readonly KirbyState[] = [
+  "idle",
+  "walk",
+  "crouch",
+  "dance",
+  "lie",
+];
+
 export const STATE_LABELS: Record<string, string> = {
   idle: "待机",
   crouch: "蹲下",
@@ -194,6 +206,22 @@ export const useAnimatorStore = defineStore("animator", () => {
   // Selected mage skin variant (only used when characterType === 'mage')
   const mageSkin = ref<MageSkin>("mage");
 
+  // ---- generation type ----
+  // Which character type the 角色生成 panel produces. There is no separate
+  // "player" target: the player, Kirby and 魔界人 all share one Character
+  // hierarchy, so a character type fully describes what gets generated. A
+  // field can hold a mix of both types at once.
+  const spawnTarget = ref<CharType>("kirby");
+  const spawnMageSkin = ref<MageSkin>("mage");
+
+  /**
+   * Whether generated characters roam on their own when there is nothing to
+   * chase and nobody to follow. Default false, which is exactly the previous
+   * behaviour: a leaderless bot stands perfectly still. Turning it on lets a
+   * bot with no leader walk its own patrol route around its spawn point.
+   */
+  const botRoam = ref(false);
+
   /** Lookup table: skin name → animation data object. */
   const characterAnimData: Record<string, any> = {
     kirby: animationData,
@@ -253,6 +281,63 @@ export const useAnimatorStore = defineStore("animator", () => {
     return characterAnimData[mageSkin.value] || characterAnimData["mage"] || animationData;
   });
 
+  // ---- effective player character ----
+  // The player is whichever character is currently under takeover — the
+  // standalone `kirby` instance when `kirbyEnabled`, otherwise the taken-over
+  // bot. The animation panel and sprite-sheet selection follow this so a
+  // mage-driven player shows mage states instead of Kirby's.
+
+  /** Type of the character currently being driven. */
+  const effectiveCharacterType = computed<CharType>(() => {
+    const c = controlledEntity.value;
+    if (c === null || c === "kirby") return characterType.value;
+    const bot = bots.value.find((b: any) => b.id === c) as
+      | { characterType?: string }
+      | undefined;
+    return (bot?.characterType as CharType) ?? "kirby";
+  });
+
+  /** Skin of the character currently being driven. */
+  const effectiveMageSkin = computed<MageSkin>(() => {
+    const c = controlledEntity.value;
+    if (c === null || c === "kirby") return mageSkin.value;
+    const bot = bots.value.find((b: any) => b.id === c) as
+      | { mageSkin?: string }
+      | undefined;
+    return (bot?.mageSkin as MageSkin) ?? mageSkin.value;
+  });
+
+  /** Sprite sheet URL of the character currently being driven. */
+  const effectiveSpriteSheetUrl = computed(() =>
+    spriteSheetUrlFor(effectiveCharacterType.value, effectiveMageSkin.value),
+  );
+
+  /** Animation dataset of the character currently being driven. */
+  const effectiveAnimData = computed(() =>
+    animDataFor(effectiveCharacterType.value, effectiveMageSkin.value),
+  );
+
+  // ---- per-character-type resolution (used by generated characters) ----
+
+  /** Animation dataset for a type + skin pair. */
+  function animDataFor(type: CharType, skin: MageSkin): any {
+    if (type === "kirby") return animationData;
+    return characterAnimData[skin] || characterAnimData["mage"] || animationData;
+  }
+
+  /** Sprite sheet URL for a type + skin pair. */
+  function spriteSheetUrlFor(type: CharType, skin: MageSkin): string {
+    if (type === "kirby") return kirbySpriteSheet;
+    return characterSpriteSheets[skin] || mageSpriteSheet;
+  }
+
+  /** Panel states a character of this type can actually play. */
+  function statesFor(type: CharType): string[] {
+    const anims = animDataFor(type, "mage").animations as Record<string, unknown>;
+    const list = type === "mage" ? MAGE_PANEL_STATES : PANEL_STATES;
+    return list.filter((s) => anims[s]);
+  }
+
   // ---- playback / view state ----
   const state = ref<KirbyState>("idle");
   const speed = ref<number>(animationDataRaw.globalSpeed || 1.0);
@@ -288,12 +373,15 @@ export const useAnimatorStore = defineStore("animator", () => {
   // ---- enemies and AI bots ----
   const enemies = ref<any[]>([]);
   const bots = ref<any[]>([]);
-  const botEnabled = ref(false);
+  const botEnabled = ref(true);
   const enemyCount = ref(0);
   const maxEnemies = 15;
 
-  // No player character is drawn by default. Calling setCharacterType
-  // (e.g. via the Kirby / 魔界人 buttons) enables it.
+  // Nothing exists until the 角色生成 panel generates a character. The player
+  // is whichever character is being taken over (via 🎮 选择模式), so the
+  // standalone `kirby` instance stays disabled — generation no longer forces
+  // it on. See `effectiveCharacterType` / `effectiveMageSkin` for the values
+  // the animation panel and sprite sheet selection follow.
   const kirbyEnabled = ref(false);
 
   // True while a direction key is held: the player is driving the character by
@@ -342,6 +430,21 @@ export const useAnimatorStore = defineStore("animator", () => {
     const s = displayState.value;
     if (s === null) return "未选中";
     return STATE_LABELS[s] || s;
+  });
+
+  /**
+   * States the animation panel offers for the player character, filtered by the
+   * player's own character type and by what its sheet actually ships:
+   * Kirby gets the full panel list, mage only its five states.
+   *
+   * The "player" here is whichever character is currently being driven, so a
+   * mage-driven player shows mage states (not Kirby's) automatically.
+   */
+  const playerAnimStates = computed<readonly string[]>(() => {
+    const anims = effectiveAnimData.value.animations as Record<string, unknown>;
+    const list =
+      effectiveCharacterType.value === "mage" ? MAGE_PANEL_STATES : PANEL_STATES;
+    return list.filter((s) => anims[s]);
   });
 
   const currentAnim = computed<AnimationConfig>(() => getCurrentAnimation());
@@ -508,7 +611,6 @@ export const useAnimatorStore = defineStore("animator", () => {
     bot.x = viewport.width / 2 + (Math.random() - 0.5) * 200;
     bot.y = groundY();
     bots.value.push(bot);
-    botEnabled.value = true;
   }
 
   /** Spawn N bots at once, each with a unique name. */
@@ -519,10 +621,9 @@ export const useAnimatorStore = defineStore("animator", () => {
     }
   }
 
-  /** Remove every bot and disable AI. */
+  /** Remove every generated character. The AI toggle itself is left alone. */
   function clearBots(): void {
     bots.value = [];
-    botEnabled.value = false;
     if (controlledEntity.value !== null && controlledEntity.value !== "kirby") {
       controlledEntity.value = null;
     }
@@ -546,32 +647,76 @@ export const useAnimatorStore = defineStore("animator", () => {
     for (let i = 0; i < n; i++) spawnEnemyOfType(type);
   }
 
+  /**
+   * Start or pause AI for every generated character. Pausing stands the whole
+   * field down at idle — the characters stay on the map and keep simulating
+   * (gravity, collisions, animations), they just stop acting.
+   */
   function toggleBot(): void {
     botEnabled.value = !botEnabled.value;
-    if (!botEnabled.value) {
-      bots.value = [];
-      if (controlledEntity.value !== null && controlledEntity.value !== "kirby") {
-        controlledEntity.value = null;
-      }
-    }
   }
 
-  /** Manually spawn Kirby. Kirby is not auto-generated on init. */
-  /** Spawn a character (AIBot). Can be controlled via takeover mode. */
-  function spawnKirby(): void {
-    const bot = new AIBot({ name: `Bot-${bots.value.length + 1}` });
+  /**
+   * Spawn one AI character of the type currently chosen in the 角色生成 panel.
+   * The character keeps its own type, skin and animation dataset, so a field
+   * can mix Kirby and mage characters.
+   */
+  function spawnCharacter(): void {
+    const type = spawnTarget.value;
+    const skin = type === "mage" ? spawnMageSkin.value : "mage";
+    const label = type === "kirby" ? "Kirby" : skin;
+    // Spread followers BEHIND the leader (always in the -X direction) so they
+    // never have to cross paths. With alternating left/right offsets, half the
+    // bots ended up walking forward and the other half backward — they each
+    // had to cross the leader's position to reach their opposite-side slot,
+    // which made the formation look like chaos. A pure "tail" pattern keeps
+    // every follower on the same side of the leader; they all walk the same
+    // direction when the leader moves and converge to distinct slots without
+    // ever passing each other.
+    //
+    // The slot is RELATIVE to the leader's current x, so when the leader
+    // turns around the trail follows correctly — slots are recomputed from
+    // `leaderX + slotOffset` every tick in the follow branch.
+    const idx = bots.value.length;
+    const slotOffset = -(idx + 1) * 60;   // -60, -120, -180, -240, ...
+    const bot = new AIBot(
+      {
+        name: `${label}-${bots.value.length + 1}`,
+        roam: botRoam.value,
+      },
+      { characterType: type, mageSkin: skin, animData: animDataFor(type, skin), slotOffset },
+    );
     bot.x = viewport.width / 2 + (Math.random() - 0.5) * 200;
     bot.y = groundY();
     bots.value.push(bot);
-    botEnabled.value = true;
   }
 
-  /** Spawn N characters at once. */
+  /** Spawn N characters of the chosen type at once. */
   function spawnCharacters(count: number): void {
     const n = Math.min(20, Math.max(1, Math.floor(count) || 1));
     for (let i = 0; i < n; i++) {
-      spawnKirby();
+      spawnCharacter();
     }
+  }
+
+  /** Switch which character type the generation panel spawns. */
+  function setSpawnTarget(kind: CharType): void {
+    spawnTarget.value = kind;
+  }
+
+  /** Switch the mage skin the generation panel spawns. */
+  function setSpawnMageSkin(skin: MageSkin): void {
+    spawnMageSkin.value = skin;
+  }
+
+  /**
+   * Choose whether new characters roam on their own. Applied at spawn time
+   * only — bots already on the field keep the setting they were born with, so
+   * toggling it mid-scene cannot change a character that is halfway to its
+   * follow slot.
+   */
+  function setBotRoam(value: boolean): void {
+    botRoam.value = value;
   }
 
   /**
@@ -597,6 +742,24 @@ export const useAnimatorStore = defineStore("animator", () => {
     } else {
       takeoverMode.value = true;
     }
+  }
+
+  /**
+   * Apply an animation state chosen in the 动画控制 panel to the character the
+   * player is currently driving — the standalone `kirby` when that's the player,
+   * otherwise the taken-over bot. State buttons never spawn or swap characters;
+   * they just act on whatever is being driven.
+   */
+  function setPlayerAnimState(animState: string): void {
+    if (!playerAnimStates.value.includes(animState)) return;
+    const c = controlledEntity.value;
+    if (c === null) return;
+    if (c === "kirby") {
+      state.value = animState as KirbyState;
+      return;
+    }
+    const bot = bots.value.find((b: any) => b.id === c);
+    if (bot) bot.animState = animState;
   }
 
   /**
@@ -655,15 +818,32 @@ export const useAnimatorStore = defineStore("animator", () => {
     animState: string;
     animFrameIndex: number;
     name: string;
+    characterType: CharType;
+    mageSkin: MageSkin;
+    sheetUrl: string;
+    animations: Record<string, AnimationConfig>;
+    scaleMultiplier: number;
   }> {
-    return bots.value.map((bot: any) => ({
-      x: bot.x,
-      y: bot.y,
-      flip: bot.dir === 1,
-      animState: bot.animState,
-      animFrameIndex: bot.animFrameIndex,
-      name: bot.name,
-    }));
+    return bots.value.map((bot: any) => {
+      const type = (bot.characterType ?? "kirby") as CharType;
+      const skin = (bot.mageSkin ?? "mage") as MageSkin;
+      return {
+        x: bot.x,
+        y: bot.y,
+        flip: bot.dir === 1,
+        animState: bot.animState,
+        animFrameIndex: bot.animFrameIndex,
+        name: bot.name,
+        characterType: type,
+        mageSkin: skin,
+        sheetUrl: spriteSheetUrlFor(type, skin),
+        animations: (bot.animData ?? animationData).animations as Record<
+          string,
+          AnimationConfig
+        >,
+        scaleMultiplier: type === "kirby" ? 1.0 : 0.22,
+      };
+    });
   }
 
   function setSpriteSheet(sheet: HTMLImageElement | null): void {
@@ -677,24 +857,12 @@ export const useAnimatorStore = defineStore("animator", () => {
     rebuildGroundBlocks();
   }
 
-  /** Switch between Kirby and Mage (魔界人). Skin stays unchanged. */
-  function setCharacterType(type: CharType): void {
-    characterType.value = type;
-    kirbyEnabled.value = true;
-    frameIndex.value = 0;
-    state.value = "idle";
-  }
-
-  /** Switch mage skin variant. Only applies when characterType === 'mage'. */
-  function setMageSkin(skin: MageSkin): void {
-    mageSkin.value = skin;
-    frameIndex.value = 0;
-  }
-
   /** Current sprite sheet source URL based on character type + skin. */
   function getSpriteSheetUrl(): string {
-    if (characterType.value === "kirby") return kirbySpriteSheet;
-    return characterSpriteSheets[mageSkin.value] || mageSpriteSheet;
+    // Returns the sheet of whatever character is currently being driven, so
+    // the sprite-sheet watcher reloads correctly when the player takes over a
+    // bot of a different type.
+    return effectiveSpriteSheetUrl.value;
   }
 
   // ---- frame editor ----
@@ -798,8 +966,19 @@ export const useAnimatorStore = defineStore("animator", () => {
     const botList = bots.value as AIBot[];
     if (botList.length === 0) return;
 
+    // The leader (controlled bot, or Kirby when enabled) is the anchor — other
+    // bots push themselves away from it but it is never displaced. Without
+    // this guard, a tight cluster around a stationary leader jitters: each
+    // bot's pass pushes the leader slightly, every other bot chases the new
+    // position next tick, the cluster never settles.
+    const leaderId =
+      controlledEntity.value !== null && controlledEntity.value !== "kirby"
+        ? controlledEntity.value
+        : null;
+
     const playerRef = buildPlayerCollisionRef(frameData);
     for (const botA of botList) {
+      if (leaderId !== null && botA.id === leaderId) continue;
       const others: CharacterRef[] = [];
       if (playerRef) others.push(playerRef);
       for (const botB of botList) {
@@ -884,8 +1063,10 @@ export const useAnimatorStore = defineStore("animator", () => {
     }
     enemyCount.value = enemyList.length;
 
-    // Update bots
-    if (botEnabled.value) {
+    // Update bots. This always runs: pausing AI stands the field down rather
+    // than skipping the update, so a paused bot keeps falling, colliding and
+    // animating instead of freezing mid-stride.
+    {
       const botList = bots.value as AIBot[];
       // The player's held direction, or 0 if none or if both ways are held.
       let playerDir = 0;
@@ -898,7 +1079,13 @@ export const useAnimatorStore = defineStore("animator", () => {
       const controlled = controlledEntity.value;
       const controlledBotId =
         controlled !== null && controlled !== "kirby" ? controlled : null;
-      const standDown = playerDir !== 0;
+      // Bots always follow when there is a leader. The leader is exempt from
+      // soft-push in `separateBots`, so followers trailing the leader no
+      // longer squeeze the player out of position when they catch up — they
+      // can run their AI every tick instead of being stood down whenever a key
+      // is held. (Previously `standDown = playerDir !== 0` made them idle
+      // while the player moved, which left a stranded cluster behind and
+      // caused the followers to make a long catch-up walk on release.)
 
       // Compute leader position: the controlled bot if one exists, Kirby if
       // enabled, otherwise null (no leader → bots stay idle).
@@ -921,21 +1108,22 @@ export const useAnimatorStore = defineStore("animator", () => {
           controlledBotId !== null && bot.id === controlledBotId;
         bot.manualDriven = driven;
         bot.manualDriveDir = playerDir;
-        bot.aiSuspended = standDown;
+        // Panel AI toggle: a paused character still simulates but acts nothing out.
+        bot.aiStopped = !botEnabled.value;
         // Clear stale locks from this bot before update
         for (const e of enemyList) {
           if (e.lockedBy === bot.id) e.lockedBy = undefined;
         }
-        // If no leader, pass the bot's own position so it stays idle
-        const targetX = leaderX !== null ? leaderX : bot.x;
-        const targetY = leaderY !== null ? leaderY : bot.y;
+        // No leader at all (no player character and no takeover target) →
+        // null tells the bot to stand completely still instead of following
+        // its own position (which would otherwise look like idle-shuffling).
         bot.update(
           deltaTime,
           groundYVal,
           world.allSolids().filter((b: any) => !b.dead),
           enemyList.filter((e: any) => !e.dead),
-          targetX,
-          targetY,
+          leaderX,
+          leaderY,
         );
         // Lock the bot's target so other bots skip it
         if (bot.targetEnemy) {
@@ -953,7 +1141,11 @@ export const useAnimatorStore = defineStore("animator", () => {
           bot.state === BotState.CHASE ||
           bot.state === BotState.PATROL ||
           (bot.state === BotState.IDLE && bot.animState !== "idle");
-        if (moved < 0.5 && bot.onGround && wantsToMove) {
+        // A patroller standing still on purpose (a zero-velocity motion-clip
+        // segment) is not stuck — counting it here would make a bot that is
+        // deliberately waiting hop for no reason.
+        const intendsMotion = bot.state !== BotState.PATROL || bot.vx !== 0;
+        if (moved < 0.5 && bot.onGround && wantsToMove && intendsMotion) {
           bot.triggerDodgeJump();
         }
       }
@@ -1009,10 +1201,17 @@ export const useAnimatorStore = defineStore("animator", () => {
 
     if (controlledEntity.value === null) return;
     if (controlledEntity.value !== "kirby") {
-      // Bot control: only track direction keys, don't process Kirby state machine
+      // Bot control: only track direction keys + jump (jump is a one-shot
+      // request handled by the bot's `manualJump` flag), don't process the
+      // Kirby state machine.
       if (LEFT_KEYS.includes(e.key) || RIGHT_KEYS.includes(e.key)) {
         heldDirKeys.add(e.key);
         manualControl.value = heldDirKeys.size > 0;
+      }
+      const c = e.key.toLowerCase();
+      if (c === "c" || c === " ") {
+        const bot = bots.value.find((b: any) => b.id === controlledEntity.value);
+        if (bot) bot.manualJump = true;
       }
       return;
     }
@@ -1283,6 +1482,9 @@ export const useAnimatorStore = defineStore("animator", () => {
     animationData,
     characterType,
     mageSkin,
+    spawnTarget,
+    spawnMageSkin,
+    botRoam,
     activeAnimationData,
     isJumping,
     editingMode,
@@ -1316,18 +1518,21 @@ export const useAnimatorStore = defineStore("animator", () => {
     spawnEnemiesOfType,
     spawnBot,
     spawnBots,
-    spawnKirby,
     spawnCharacters,
+    setSpawnTarget,
+    setSpawnMageSkin,
+    setBotRoam,
+    statesFor,
     toggleBot,
     toggleTakeoverMode,
     selectCharacterAt,
     getPlayerVisualBox,
+    setPlayerAnimState,
+    playerAnimStates,
     clearEnemies,
     clearBots,
     getBotRenderState,
     setViewport,
-    setCharacterType,
-    setMageSkin,
     getSpriteSheetUrl,
     prevFrame,
     nextFrame,

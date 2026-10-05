@@ -16,6 +16,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import { SpriteRenderer, SPRITE_BASE_SCALE } from "../engine";
+import { getFrameTightBox } from "../engine/tightBox";
 import type { AnimationConfig, Frame } from "../engine";
 import { useAnimatorStore, usePanelStore } from "../stores";
 
@@ -41,10 +42,12 @@ function frameScreenBox(
   feetY: number,
   effectiveScale: number,
   flip: boolean,
+  sheet?: CanvasImageSource | null,
+  sheetKey?: string,
 ): { cx: number; cy: number; halfW: number; halfH: number } | null {
-  // Reuse the Character's tight-box cache so we never re-rasterise a frame
-  // we have already analysed.
-  const tight = animator.kirby.getTightBox(frame);
+  // Measured against the sheet this character is actually drawn from, so a
+  // mage character's glow uses its own pixels rather than the player's.
+  const tight = getFrameTightBox(sheet ?? null, frame, sheetKey);
   const s = effectiveScale;
 
   const halfW = (tight.bw * s) / 2;
@@ -168,6 +171,8 @@ function drawHoverGlow(
 
 let ctx: CanvasRenderingContext2D | null = null;
 let renderer: SpriteRenderer | null = null;
+/** The player's decoded sheet, kept for tight-box measurement of the glow. */
+let playerSheet: HTMLImageElement | null = null;
 let animationId: number | null = null;
 let lastTime = 0;
 
@@ -203,7 +208,7 @@ function animate(timestamp: number) {
   const showNext = animator.onionMode === "next" || animator.onionMode === "both";
 
   // Draw hover glow behind Kirby if hovered (only when Kirby is present)
-  if (animator.kirbyEnabled && hover?.type === "kirby") {
+  if (animator.kirbyEnabled && hover?.type === "kirby" && frame) {
     const rs = animator.buildRenderState();
     const feetX = rs.canvasWidth / 2 + rs.charX;
     const feetY = rs.groundY + rs.charY;
@@ -212,7 +217,15 @@ function animate(timestamp: number) {
     // here so the glow sits on the same rendered pixels.
     const effectiveScale =
       rs.scale * (rs.characterScaleMultiplier ?? 1.0);
-    const box = frameScreenBox(frame, feetX, feetY, effectiveScale, rs.flip);
+    const box = frameScreenBox(
+      frame,
+      feetX,
+      feetY,
+      effectiveScale,
+      rs.flip,
+      playerSheet,
+      animator.getSpriteSheetUrl(),
+    );
     if (box) {
       // Glow radius = long axis of the tight box plus a small breathing room.
       const r = Math.max(box.halfW, box.halfH) + 6;
@@ -255,17 +268,28 @@ function animate(timestamp: number) {
   const groundY = animator.groundY();
   const botRenderStates = animator.getBotRenderState();
   const botsList = animator.bots as any[];
-  const anims = animator.activeAnimationData.animations as Record<string, AnimationConfig>;
-  // Bots always render at characterScaleMultiplier = 1.0, regardless of which
-  // character the player picked. Mirror that here so the glow matches.
-  const botEffectiveScale = renderState.scale;
   for (let i = 0; i < botRenderStates.length; i++) {
     const botRS = botRenderStates[i];
     const botObj = botsList[i];
+    // Each generated character carries its own dataset and sheet, so a field
+    // can mix Kirby and mage characters.
+    const anims = botRS.animations;
     const botAnim = anims[botRS.animState] ?? anims["idle"];
     if (!botAnim) continue;
     const botFrame = botAnim.frames[botRS.animFrameIndex % botAnim.frames.length];
     if (!botFrame) continue;
+
+    // A mage character is drawn at its own compensation scale; Kirby stays 1.0.
+    const botRenderState = {
+      ...renderState,
+      charX: botRS.x - viewport.width / 2,
+      charY: botRS.y - groundY,
+      flip: botRS.flip,
+      characterScaleMultiplier: botRS.scaleMultiplier,
+    };
+    const botSheet = renderer.sheetFor(botRS.sheetUrl);
+    if (!botSheet) continue;
+    const botScale = renderState.scale * botRS.scaleMultiplier;
 
     // Draw hover glow behind this bot if it is hovered.
     // Position the glow on the tight-box centre of the bot's current frame
@@ -275,8 +299,10 @@ function animate(timestamp: number) {
         botFrame,
         botRS.x,
         botRS.y,
-        botEffectiveScale,
+        botScale,
         botRS.flip,
+        botSheet,
+        botRS.sheetUrl,
       );
       if (box) {
         const r = Math.max(box.halfW, box.halfH) + 6;
@@ -284,14 +310,7 @@ function animate(timestamp: number) {
       }
     }
 
-    const botRenderState = {
-      ...renderState,
-      charX: botRS.x - viewport.width / 2,
-      charY: botRS.y - groundY,
-      flip: botRS.flip,
-      characterScaleMultiplier: 1.0,
-    };
-    renderer.drawCharacter(botFrame, botAnim, botRenderState);
+    renderer.drawCharacter(botFrame, botAnim, botRenderState, 0, 0, 1.0, undefined, botSheet);
   }
 
   // Physics debug overlay on the very top so it is never hidden by sprites
@@ -329,6 +348,7 @@ watch(
     if (!ctx) return;
     const sheet = await loadSpriteSheet();
     animator.setSpriteSheet(sheet);
+    playerSheet = sheet;
     renderer?.setSpriteSheet(sheet);
   },
 );
@@ -340,6 +360,7 @@ watch(
     if (!ctx || animator.characterType !== "mage") return;
     const sheet = await loadSpriteSheet();
     animator.setSpriteSheet(sheet);
+    playerSheet = sheet;
     renderer?.setSpriteSheet(sheet);
   },
 );
@@ -359,6 +380,7 @@ async function init() {
   const sheet = await loadSpriteSheet();
   // Hand the sheet to the engine so it can compute pixel-tight collision boxes
   animator.setSpriteSheet(sheet);
+  playerSheet = sheet;
   renderer = new SpriteRenderer(ctx, sheet);
 
   lastTime = performance.now();

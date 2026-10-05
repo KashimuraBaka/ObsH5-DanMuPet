@@ -5,7 +5,7 @@
  * world with Kirby but don't need physics body interaction.
  */
 
-import type { Rect } from "./types.ts";
+import type { DamageKind, Rect, ResistTable } from "./types.ts";
 
 // ---- types ----
 
@@ -28,14 +28,60 @@ export interface EnemyConfig {
   speed: number;
   health: number;
   patrolRange: number;
+  /**
+   * Signed damage coefficients, one per damage channel.
+   *
+   * Hard constraint, learned the expensive way from the original game: the
+   * lookup key is the entity's **own** type, never the behaviour archetype it
+   * happens to share. In the original, two hands of the same boss archetype
+   * carry mirrored rows, so keying the table by "what kind of creature is
+   * this" would make them identical. Holding the row on the instance (filled
+   * from `DEFAULTS[type]` at construction) makes that mistake impossible: a new
+   * variant has to declare its own row.
+   */
+  resist: ResistTable;
 }
 
 // ---- per-type defaults ----
+//
+// Health is deliberately not 1: a bot's bite removes `BOT_INHALE_DAMAGE` (2)
+// per hit, so these numbers decide how many bites each type costs. 5 / 4 / 4
+// keeps a fight to two or three bites — long enough that the hit reaction and
+// the health bar are actually visible, short enough that it does not drag.
+//
+// `resist` values are designed here, not lifted from the original: 0 is normal,
+// negative is resistance, positive is a weakness. FLYER and JUMPER are a
+// deliberate mirror pair on the contact channel (it hangs in the air, so a
+// grab connects less; it is also the one that moves in a straight line, so the
+// reserved burst channel hits it harder). Note the -1/-2 only do anything
+// because the base damage is 2 — at a base of 1 the clamp would flatten them
+// back to no effect at all.
 
 const DEFAULTS: Record<EnemyType, Omit<EnemyConfig, "type">> = {
-  [EnemyType.WALKER]: { w: 30, h: 28, speed: 1.2, health: 3, patrolRange: 120 },
-  [EnemyType.FLYER]: { w: 28, h: 22, speed: 1.5, health: 2, patrolRange: 150 },
-  [EnemyType.JUMPER]: { w: 26, h: 26, speed: 2.0, health: 2, patrolRange: 100 },
+  [EnemyType.WALKER]: {
+    w: 30,
+    h: 28,
+    speed: 1.2,
+    health: 5,
+    patrolRange: 120,
+    resist: { contact: 0, burst: 0 },
+  },
+  [EnemyType.FLYER]: {
+    w: 28,
+    h: 22,
+    speed: 1.5,
+    health: 4,
+    patrolRange: 150,
+    resist: { contact: -1, burst: 2 },
+  },
+  [EnemyType.JUMPER]: {
+    w: 26,
+    h: 26,
+    speed: 2.0,
+    health: 4,
+    patrolRange: 100,
+    resist: { contact: 0, burst: -2 },
+  },
 };
 
 // ---- constants ----
@@ -68,6 +114,13 @@ export class Enemy {
   // health
   health: number;
   maxHealth: number;
+
+  /**
+   * Signed damage coefficients for this instance, copied from `DEFAULTS` at
+   * construction. Kept on the instance rather than in a `resist[type]` lookup
+   * — see the note on `EnemyConfig.resist`.
+   */
+  resist: ResistTable;
 
   // movement
   speed: number;
@@ -106,6 +159,7 @@ export class Enemy {
     this.speed = d.speed;
     this.health = d.health;
     this.maxHealth = d.health;
+    this.resist = { ...d.resist };
     this.patrolRange = d.patrolRange;
     this.patrolCenterX = x;
   }
@@ -329,10 +383,23 @@ export class Enemy {
   /**
    * Apply damage to this enemy.
    *
+   * `amount` is the *base* damage of the hit, not the final number: the
+   * per-channel coefficient is applied here so that a caller cannot bypass the
+   * table by hard-coding a constant (that mistake makes the whole table dead
+   * code without failing loudly). One hit resolves against exactly one channel
+   * today; the original allowed several bits to be set at once and took the
+   * maximum of the resulting damage, never the sum.
+   *
+   * The floor of 1 is the original's clamp and it is load-bearing: it is what
+   * makes "resistant" mean "bleeds slowly" rather than "cannot be hurt". An
+   * enemy can therefore always be killed, just not quickly.
+   *
    * @returns true if the enemy died from this damage
    */
-  takeDamage(amount: number): boolean {
-    this.health -= amount;
+  takeDamage(amount: number, kind: DamageKind = "contact"): boolean {
+    const coef = this.resist[kind] ?? 0;
+    const dmg = Math.max(1, amount + coef);
+    this.health -= dmg;
     if (this.health <= 0) {
       this.health = 0;
       this.dead = true;

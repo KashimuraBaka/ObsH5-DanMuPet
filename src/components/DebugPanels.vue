@@ -62,45 +62,29 @@
       </header>
 
       <div class="floating-panel-body" v-show="!panels.panels[def.id].collapsed">
-        <!-- ---------- Animation controls ---------- -->
+        <!-- ---------- Animation controls (player character only) ---------- -->
         <template v-if="def.id === 'controls'">
-          <!-- Character type selector -->
-          <div class="control-group">
-            <label>角色</label>
-            <div class="state-btn-group">
-              <button
-                v-for="c in ALL_CHARACTERS"
-                :key="c"
-                :class="['state-btn', { active: animator.characterType === c }]"
-                @click="animator.setCharacterType(c)"
-              >{{ c === 'kirby' ? 'Kirby' : '魔界人' }}</button>
-            </div>
-          </div>
-          <!-- Skin selector (only for mage) -->
-          <div v-if="animator.characterType === 'mage'" class="control-group">
-            <label>皮肤</label>
-            <div class="state-btn-group skin-list">
-              <button
-                v-for="s in MAGE_SKINS"
-                :key="s"
-                :class="['state-btn', { active: animator.mageSkin === s }]"
-                @click="animator.setMageSkin(s)"
-              >{{ s }}</button>
-            </div>
-          </div>
+          <!-- States: only meaningful once a player character exists -->
           <div class="control-group control-group-states">
             <label>状态</label>
-            <div class="state-btn-group">
+            <div v-if="animator.controlledEntity === null" class="state-empty">
+              请先在「🎭 角色生成」面板生成角色，再用「🎮 选择模式」选中一个
+            </div>
+            <div v-else class="state-btn-group">
               <button
-                v-for="s in visibleStates"
+                v-for="s in animator.playerAnimStates"
                 :key="s"
                 :class="['state-btn', { active: animator.displayState === s }]"
-                @click="animator.state = s"
+                @click="animator.setPlayerAnimState(s)"
               >
                 {{ STATE_LABELS[s] }}
               </button>
             </div>
           </div>
+
+          <!-- Display parameters: global, independent of which character plays -->
+          <div class="control-group-divider"></div>
+
           <div class="control-group">
             <label>速度</label>
             <input
@@ -319,20 +303,58 @@
           <div class="gen-body">
             <div class="gen-section">
               <h5>生成角色</h5>
-              <div class="gen-btns">
-                <button class="gen-btn gen-btn-primary" @click="animator.spawnKirby()">🤖 ×1</button>
-                <button class="gen-btn" @click="animator.spawnCharacters(3)">🤖 ×3</button>
-                <button class="gen-btn" @click="animator.spawnCharacters(5)">🤖 ×5</button>
+              <div class="gen-row">
+                <label class="gen-label">类型</label>
+                <select
+                  class="gen-select"
+                  :value="animator.spawnTarget"
+                  @change="animator.setSpawnTarget(($event.target as HTMLSelectElement).value as any)"
+                >
+                  <option value="kirby">Kirby</option>
+                  <option value="mage">魔界人</option>
+                </select>
               </div>
+              <div v-if="animator.spawnTarget === 'mage'" class="gen-row">
+                <label class="gen-label">皮肤</label>
+                <select
+                  class="gen-select"
+                  :value="animator.spawnMageSkin"
+                  @change="animator.setSpawnMageSkin(($event.target as HTMLSelectElement).value as any)"
+                >
+                  <option v-for="s in MAGE_SKINS" :key="s" :value="s">{{ s }}</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="gen-section">
+              <h5>生成角色</h5>
+              <div class="gen-btns">
+                <button class="gen-btn gen-btn-primary" @click="animator.spawnCharacters(1)">×1</button>
+                <button class="gen-btn" @click="animator.spawnCharacters(3)">×3</button>
+                <button class="gen-btn" @click="animator.spawnCharacters(5)">×5</button>
+              </div>
+              <p class="gen-hint">生成的角色包含玩家本身，可直接用方向键操作</p>
             </div>
 
             <div class="gen-section">
               <h5>AI 控制</h5>
               <div class="gen-btns">
                 <button class="gen-btn" :class="{ 'gen-active': animator.botEnabled }" @click="animator.toggleBot()">
-                  {{ animator.botEnabled ? '⏸ 暂停 AI' : '▶ 启动 AI' }}
+                  {{ animator.botEnabled ? '⏸ 停止 AI' : '▶ 启动 AI' }}
                 </button>
               </div>
+              <div class="gen-row">
+                <label class="gen-label">无目标时</label>
+                <select
+                  class="gen-select"
+                  :value="animator.botRoam ? 'roam' : 'hold'"
+                  @change="animator.setBotRoam(($event.target as HTMLSelectElement).value === 'roam')"
+                >
+                  <option value="hold">原地待命</option>
+                  <option value="roam">自动巡逻</option>
+                </select>
+              </div>
+              <p class="gen-hint">停止 AI 后角色仍留在场上，只是站着不动；巡逻只在生成时生效</p>
             </div>
 
             <div class="gen-section">
@@ -345,7 +367,7 @@
               <div class="gen-controlled">
                 <span>当前控制：</span>
                 <b v-if="animator.controlledEntity === 'kirby'">Kirby</b>
-                <b v-else-if="animator.controlledEntity !== null">Bot #{{ animator.controlledEntity }}</b>
+                <b v-else-if="animator.controlledEntity !== null">{{ controlledName }}</b>
                 <span v-else class="gen-dim">无</span>
               </div>
             </div>
@@ -397,9 +419,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, type CSSProperties } from 'vue'
 import {
-  ALL_CHARACTERS,
   MAGE_SKINS,
-  PANEL_STATES,
   PANEL_DEFS,
   STATE_LABELS,
   useAnimatorStore,
@@ -414,24 +434,26 @@ const ui = useUiStore()
 const panels = usePanelStore()
 const animator = useAnimatorStore()
 
-/**
- * States to show in the panel, filtered by the current character type.
- * Mage (魔界人) only supports: idle, walk, crouch, dance, lie.
- * Kirby supports all KIRBY_STATES.
- */
-const visibleStates = computed(() => {
-  if (animator.characterType === 'mage') {
-    return PANEL_STATES.filter(s =>
-      ['idle', 'walk', 'crouch', 'dance', 'lie'].includes(s)
-    )
-  }
-  return PANEL_STATES
-})
-
 /** Panel geometry, typed for Vue's :style binding. */
 function panelStyle(id: PanelId): CSSProperties {
   return panels.styleFor(id) as CSSProperties
 }
+
+/**
+ * Name of the character currently under takeover, showing what it actually is
+ * rather than an internal bot id.
+ */
+const controlledName = computed(() => {
+  const id = animator.controlledEntity
+  if (id === null) return ''
+  if (id === 'kirby') {
+    return animator.characterType === 'mage'
+      ? `魔界人 · ${animator.mageSkin}`
+      : 'Kirby'
+  }
+  const bot = (animator.bots as any[]).find(b => b.id === id)
+  return bot?.name ?? `角色 #${id}`
+})
 
 /** Which panel is being dragged / resized right now (drives the CSS state). */
 const dragId = ref<PanelId | null>(null)
@@ -1011,6 +1033,27 @@ onUnmounted(() => {
   min-width: 0;
 }
 
+/* Shown in place of the state buttons when no player character exists, so the
+   panel prompts for one instead of offering Kirby states that do nothing yet. */
+.state-empty {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: 0.7;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+  text-align: center;
+}
+
+/* Separates the character-specific states from the global display params */
+.control-group-divider {
+  height: 1px;
+  margin: 10px 0 4px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
 /* Character list: scrollable, smaller buttons */
 .char-list {
   max-height: 120px;
@@ -1026,16 +1069,45 @@ onUnmounted(() => {
   font-size: 0.7em;
 }
 
-/* Skin list: wrap in a compact grid */
-.skin-list {
-  max-height: 100px;
-  overflow-y: auto;
-  gap: 4px;
+/* Mage skin picker: 14 variants are too many for buttons, so a combo box.
+   Shown as a labelled row so it lines up with the type buttons above it. */
+.gen-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
 }
 
-.skin-list .state-btn {
-  padding: 3px 6px;
-  font-size: 0.65em;
+.gen-label {
+  flex: 0 0 auto;
+  font-size: 0.7em;
+  opacity: 0.75;
+}
+
+.gen-select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  font-size: 0.7em;
+  font-family: inherit;
+  color: inherit;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.gen-select:hover {
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+.gen-select:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.5);
+}
+
+.gen-select option {
+  background: #1b1d24;
+  color: #e8e8ea;
 }
 
 .state-btn {

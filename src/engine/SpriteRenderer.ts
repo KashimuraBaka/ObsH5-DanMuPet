@@ -55,6 +55,13 @@ export interface SceneLayout {
  * screenshot-tested) without a component instance.
  */
 export class SpriteRenderer {
+  /**
+   * Extra sheets keyed by asset URL. Generated characters can each be a
+   * different character type, so the single `sheet` above is not enough —
+   * this keeps one decoded image per sheet instead of reloading per frame.
+   */
+  private readonly sheetCache = new Map<string, HTMLImageElement>();
+
   constructor(
     private readonly ctx: CanvasRenderingContext2D,
     private sheet: HTMLImageElement | null,
@@ -63,6 +70,21 @@ export class SpriteRenderer {
   /** Swap in a newly loaded sprite sheet. */
   setSpriteSheet(sheet: HTMLImageElement | null): void {
     this.sheet = sheet;
+  }
+
+  /**
+   * Resolve a sheet URL to a decoded image, loading it on first use.
+   * Returns null (and the caller then draws nothing) while it is still
+   * loading or if the load fails.
+   */
+  sheetFor(url: string): HTMLImageElement | null {
+    const cached = this.sheetCache.get(url);
+    if (cached) return cached.complete && cached.naturalWidth > 0 ? cached : null;
+
+    const img = new Image();
+    img.src = url;
+    this.sheetCache.set(url, img);
+    return null;
   }
 
   /** Static scenery: sky gradient, sub-ground fill and the ground bricks. */
@@ -169,9 +191,11 @@ export class SpriteRenderer {
     offsetY = 0,
     opacity = 1.0,
     tint?: string,
+    sheetOverride?: HTMLImageElement | null,
   ): void {
     const { ctx } = this;
-    if (!frame || !this.sheet) return;
+    const sheet = sheetOverride ?? this.sheet;
+    if (!frame || !sheet) return;
 
     const { x, y, w, h } = frame;
 
@@ -192,7 +216,7 @@ export class SpriteRenderer {
     );
     ctx.scale(shouldFlip ? -finalScale : finalScale, finalScale);
 
-    ctx.drawImage(this.sheet, x, y, w, h, -w / 2, -h, w, h);
+    ctx.drawImage(sheet, x, y, w, h, -w / 2, -h, w, h);
 
     // Tint overlay for onion skin
     if (tint) {

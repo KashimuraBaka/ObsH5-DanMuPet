@@ -87,7 +87,7 @@ export const PANEL_DEFS: PanelDefinition[] = [
   },
   {
     id: "botGen",
-    title: "🤖 Bot 生成",
+    title: "🎭 角色生成",
     page: "animator",
     className: "bot-gen-panel",
     initialTop: 440,

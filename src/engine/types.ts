@@ -80,6 +80,40 @@ export interface Point {
   y: number;
 }
 
+/**
+ * Damage channels an attack can travel down.
+ *
+ * The original game describes an attacker's damage as a bit set and resolves
+ * it against a per-enemy row of signed coefficients — six columns in the ROM
+ * table, and seven bits in the code, which is exactly the kind of
+ * one-more-than-the-table-holds that produced the original's out-of-bounds
+ * reads for the placeholder enemy types. We keep the *mechanism* (a signed
+ * coefficient per channel, clamped so damage never drops below 1) and use an
+ * explicit enum instead of a bit set, so adding a channel is a type error
+ * rather than an overflow.
+ *
+ * Only "contact" exists today; "burst" is the reserved slot for a ranged
+ * attack, and it is deliberately kept in the enum now rather than added later
+ * so the resistance table shape does not have to change when it arrives.
+ */
+export type DamageKind = "contact" | "burst";
+
+/**
+ * Per-enemy damage coefficients, indexed by {@link DamageKind}.
+ *
+ * Sign convention (this is the code fact, `object.c:538-552` of the original,
+ * not an interpretation): `0` is normal damage, a **negative** value is
+ * resistance and a **positive** value is a weakness. Damage resolves as
+ * `max(1, amount + coefficient)`; when one hit qualifies for several channels
+ * the largest resulting value wins rather than the sum, because the channels
+ * are an either/or description of the attack, not a stack of modifiers.
+ *
+ * Values are ours. The original encodes 86 enemy types against its own level
+ * balance and there is no correspondence between those and our three enemy
+ * types, so nothing is copied across.
+ */
+export type ResistTable = Record<DamageKind, number>;
+
 /** Outcome of one vertical physics step, so the caller can drive the state machine. */
 export type VerticalStepResult =
   | { kind: "standing" }

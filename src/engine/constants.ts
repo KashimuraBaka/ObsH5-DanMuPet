@@ -125,6 +125,111 @@ export const BOT_MIN_SPACING = 8;
  */
 export const BOT_COLLIDE_VERT_TOL = 4;
 
+/**
+ * Horizontal slack around a bot's assigned follow slot that counts as "settled".
+ * Must be wider than `BOT_COLLIDE_MAX_RESOLVE` (10) so incidental soft-pushes
+ * from neighbouring bots don't drag a settled bot out of the band and back
+ * into walking. 25 px is plenty for a one-frame nudge to absorb without the
+ * bot ever registering motion on its own.
+ */
+export const FOLLOW_SLOT_SETTLE_PX = 25;
+
+// ---- bot ledge sensing ----
+// A patrolling bot has to know whether there is still floor under it before it
+// commits to a step. This mirrors the original game's ground probe
+// (`sub_0809D998`): a pure geometric query with no state, no allocation and no
+// time component, so it cannot introduce frame-rate dependence.
+
+/**
+ * How far in front of the bot's feet the ledge probe reaches, in px. One bot
+ * width (24 px) would react after the leading foot was already over the drop;
+ * 16 px is far enough ahead to turn around while still standing on solid
+ * floor, and close enough that a 30 px block still reads as ground.
+ */
+export const BOT_LEDGE_LOOKAHEAD_PX = 16;
+
+/**
+ * Half-width of the probe window, in px. Widens the sample so sub-pixel
+ * wobble along a block edge cannot flip the answer between ticks — without
+ * it a bot walking flush against a platform lip would turn around every
+ * other frame.
+ */
+export const BOT_LEDGE_PROBE_HALF_PX = 2;
+
+/**
+ * Vertical tolerance for "the surface under my feet is at the right level",
+ * in px. Absorbs the exact-equality case: the ground plane test is
+ * `groundY - footY <= band`, so a bot resting exactly on `groundY` (which is
+ * where the collision step puts it) is never mistaken for standing in the air.
+ */
+export const BOT_LEDGE_GROUND_BAND_PX = 2;
+
+/**
+ * How far *down* a surface may sit and still count as somewhere to step onto,
+ * in px. Smaller than one block (30 px) on purpose: dropping off a 30 px ledge
+ * is a fall the bot cannot walk back out of, so it must read as "no ground".
+ */
+export const BOT_LEDGE_STEP_DOWN_PX = 24;
+
+// ---- bot roaming (patrol) ----
+// Timers are milliseconds throughout: `deltaTime` comes from
+// requestAnimationFrame, so a frame counter would drift whenever the tab is
+// backgrounded. The game's original numbers are frame constants (GBA ≈ 59.73
+// Hz), and the values below are the ms equivalents of the ones we borrowed —
+// e.g. `counter > 0xC0` (192 frames ≈ 3.2 s) becomes BOT_ROAM_TURN_MS = 3200.
+
+/**
+ * How long a patrolling bot walks one way before turning, in ms.
+ * 3200 ms ≈ 192 GBA frames, the slowest of the game's four patrol turn rates.
+ * Long enough that the bot actually crosses some ground before reversing,
+ * short enough that a bot left alone does not wander off screen.
+ */
+export const BOT_ROAM_TURN_MS = 3200;
+
+/**
+ * Default radius of a patrolling bot's activity around its home point, in px.
+ * The game has no equivalent — it clamps enemies inside room walls — so this
+ * is our substitute for a room boundary: it gives a loose, readable loop
+ * instead of an endless march.
+ */
+export const BOT_ROAM_RANGE_PX = 240;
+
+/**
+ * Default seed for the per-bot random streams. Fixed rather than random so
+ * that a scene replays identically between runs — a debugging aid, which is
+ * why the panel shows the seed it used.
+ */
+export const BOT_WORLD_SEED = 1;
+
+/**
+ * Damage dealt by one successful inhale bite, in hp.
+ *
+ * MUST be ≥ 2: the resistance table is `max(1, amount + coef)` (the original's
+ * formula, see Enemy.takeDamage), so with an amount of 1 the coefficients
+ * −1…−4 all clamp to exactly the same result as 0 and the entire resistance
+ * column is dead code. 2 is the smallest value that gives the table one
+ * distinguishable step without turning "swallow an enemy" into a five-hit chore.
+ */
+export const BOT_INHALE_DAMAGE = 2;
+
+/**
+ * Minimum spacing between two damage ticks from the same bot, in ms.
+ * The attack state re-tests the enemy every tick, so without a gap a 5 hp
+ * enemy dies in three frames (48 ms) and the stun/hit feedback never shows.
+ * 250 ms ≈ 15 GBA frames — long enough to read as separate bites, short
+ * enough that an enemy still dies in well under two seconds.
+ */
+export const BOT_INHALE_REHIT_MS = 250;
+
+/**
+ * How long a bot keeps chasing a target it can no longer see, in ms.
+ * The original has no "lost the target" fallback at all (each chaser is a
+ * special case), so this is an addition rather than a port; it stops a bot
+ * from snapping back to idle the instant a target crosses `chaseRange`, and
+ * stops it from chasing across the map forever when the target is gone.
+ */
+export const BOT_LAST_SEEN_MS = 2500;
+
 // ---- character physics safety ----
 
 /**
